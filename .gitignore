@@ -1,0 +1,7 @@
+*.db
+*.sqlite3
+*.session
+*.session-journal
+__pycache__/
+venv/
+.env
