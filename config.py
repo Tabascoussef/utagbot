@@ -5,5 +5,5 @@ import os
 
 API_ID = int(os.getenv("API_ID", "33465516"))
 API_HASH = os.getenv("API_HASH", "8c3c061c71bdbb70da28dc677b13e678")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8901205517:AAGdL7PKH9REGoPFX12e3LWRl6aiQcA_jCY")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8901205517:AAFfl0mCQXcmEU1YAqqNmRR-DJc-T9tpFWk")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1784313012"))

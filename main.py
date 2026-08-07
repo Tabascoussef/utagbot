@@ -3,7 +3,7 @@ import asyncio
 import logging
 import re
 
-# Event loop sozlamasi
+# Python 3.10+ va 3.14 yadroviy o'zgarishi: pyrogram sync moduli import qilinishidan oldin event loop bo'lishi shart
 try:
     asyncio.get_event_loop()
 except RuntimeError:
@@ -23,6 +23,10 @@ from aiogram.fsm.state import State, StatesGroup
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ParseMode
 from pyrogram.errors import SessionPasswordNeeded, FloodWait
+from pyrogram.types import (
+    InlineKeyboardMarkup as PyroInlineKeyboardMarkup,
+    InlineKeyboardButton as PyroInlineKeyboardButton
+)
 
 import config
 import database
@@ -48,75 +52,142 @@ class TagState(StatesGroup):
     waiting_for_limit = State()
     waiting_for_edit_text = State()
 
+class GroupTagSession(StatesGroup):
+    waiting_for_text = State()
+    waiting_for_limit = State()
+
 # --- GLOBAL LUG'ATLAR ---
 active_auth_clients = {}
 running_userbots = {}
 mailing_jobs = {}
 tag_jobs = {}
 
+# Guruhdagi faol seanslar: group_sessions[chat_id] = {"caller_id": int, "caller_name": str, "text": str, "limit": val}
+group_sessions = {}
+
 
 def escape_markdown_v1(text: str) -> str:
     """Markdown formatlashda xatolik bermasligi uchun maxsus belgilarni tozalash"""
-    return re.sub(r'([\[\]\(\)\*\_`])', r'\\\1', text)
+    if not text:
+        return ""
+    return re.sub(r'([\[\]\(\)\*\_`])', r'\\\1', str(text))
+
+
+def get_group_menu_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Matn biriktirish", callback_data="gtag_text")],
+        [InlineKeyboardButton(text="🔢 Limit belgilash", callback_data="gtag_limit")],
+        [InlineKeyboardButton(text="🚀 Otmetkani boshlash", callback_data="gtag_start")],
+        [InlineKeyboardButton(text="🛑 To'xtatish", callback_data="gtag_stop")]
+    ])
 
 
 async def start_userbot_worker(user_id: int, session_string: str):
     if user_id in running_userbots:
         return
+
     client = Client(
         name=f"worker_{user_id}",
         api_id=config.API_ID,
         api_hash=config.API_HASH,
         session_string=session_string,
-        no_updates=False  # Guruhdagi .utagbot buyrug'ini eshitish uchun True emas, False qilindi
+        no_updates=False
     )
-    
-    # --- PYROGRAM HANDLER: Guruh ichida .utagbot deb yozilganda ishlaydi ---
-    @client.on_message(filters.command(["utagbot", "tag"], prefixes=".") & (filters.group | filters.supergroup))
-    async def group_utag_trigger(cl: Client, message):
+
+    # GURUHDA ;utag CHAQRILGANDA ISHLAYDIGAN HANDLER
+    @client.on_message(filters.group & filters.command(["utag"], prefixes=";"))
+    async def handle_semicolon_utag(cl: Client, message):
+        sender_id = message.from_user.id if message.from_user else None
         chat_id = message.chat.id
-        owner_id = user_id
-        
-        # Userbot egasi yoki admin ekanligini tekshirish
-        if message.from_user and message.from_user.id != owner_id:
+        chat_title = message.chat.title or "Guruh"
+
+        if not sender_id or sender_id not in running_userbots:
             return
 
-        # Buyruq matnini ajratib olish (Masalan: .utagbot Salom hammaga)
-        args = message.text.split(maxsplit=1)
-        header_text = args[1] if len(args) > 1 else ""
+        # Tekshiruv: Faqat faoliyat olib borayotgan tegishli userbot javob berishi kerak
+        try:
+            me = await cl.get_me()
+            if sender_id != me.id:
+                return
+        except Exception as e:
+            logging.error(f"Userbot ma'lumotlarini olishda xato: {e}")
+            return
 
-        if owner_id in tag_jobs:
-            tag_jobs[owner_id]["status"] = "stopped"
+        # Guruhdagi ;utag xabarini o'chirish
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
-        tag_jobs[owner_id] = {
-            "status": "running",
-            "text": header_text,
-            "limit": "all",
-            "chat_id": chat_id,
-            "current_step": 0
+        # Guruh seansini saqlash
+        group_sessions[chat_id] = {
+            "caller_id": sender_id,
+            "caller_name": message.from_user.first_name or "Foydalanuvchi",
+            "text": "",
+            "limit": "all"
         }
 
-        # Telegram guruhidagi buyruq xabarini o'chirib tashlash (xohishga ko'ra)
-        try: await message.delete()
-        except Exception: pass
+        safe_chat_title = escape_markdown_v1(chat_title)
+        safe_first_name = escape_markdown_v1(message.from_user.first_name or "Foydalanuvchi")
 
-        control_msg = await bot.send_message(
-            chat_id=chat_id,
-            text=f"⚡️ **Guruhda otmetka qilish boshlandi!**\nSarlavha: `{header_text or 'Matnsiz'}`",
-            reply_markup=get_control_panel("running", "tag"),
-            parse_mode="markdown"
-        )
-        asyncio.create_task(background_tagging_task(owner_id))
+        # Boshqaruv menyusini GURUHGA yuborish
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"⚙️ **{safe_chat_title}** uchun otmetka menyusi\n"
+                    f"👤 Buyruq beruvchi: [{safe_first_name}](tg://user?id={sender_id})\n\n"
+                    f"📌 **Joriy sozlama:**\n"
+                    f"• Sarlavha: `Matnsiz`\n"
+                    f"• Limit: `Hammasi`\n\n"
+                    f"🔒 *Ushbu menyu tugmalaridan faqat {safe_first_name} foydalana oladi!*"
+                ),
+                reply_markup=get_group_menu_keyboard(),
+                parse_mode="markdown"
+            )
+        except Exception as e:
+            logging.error(f"Guruhga menyu yuborishda xato: {e}")
+            
+            # Bot username'ini aniqlash va PYROGRAM tugmasini yaratish
+            try:
+                bot_info = await bot.get_me()
+                add_to_group_kb = PyroInlineKeyboardMarkup([
+                    [PyroInlineKeyboardButton(
+                        text="➕ Botni guruhga qo'shish", 
+                        url=f"https://t.me/{bot_info.username}?startgroup=true"
+                    )]
+                ])
+                
+                # Userbot orqali tugmali ogohlantirish yuborish
+                await cl.send_message(
+                    chat_id,
+                    "⚠️ **Menyu chiqishi uchun rasmiy botga guruhda xabar yuborish huquqini bering yoki uni Admin qiling!**\n\n"
+                    "Tugma orqali botni guruhga qayta qo'shishingiz/sozlamasini yangilashingiz mumkin 👇",
+                    reply_markup=add_to_group_kb
+                )
+            except Exception as ex:
+                logging.error(f"Userbot orqali ogohlantirish yuborishda xato: {ex}")
 
-    await client.start()
+    try:
+        await client.start()
+    except Exception as e:
+        logging.error(f"Userbot worker start xatosi (User {user_id}): {e}")
+        return
+
+    try:
+        async for _ in client.get_dialogs(limit=50):
+            pass
+    except Exception:
+        pass
+
     running_userbots[user_id] = client
     logging.info(f"Userbot worker muvaffaqiyatli yoqildi: {user_id}")
 
 
 def get_main_keyboard(user_id: int):
     buttons = [
-        [KeyboardButton(text="⚙️ Userbot menyusi")],
-        [KeyboardButton(text="📚 Qo'llanma")]
+        [KeyboardButton(text="🚀 Guruhga xabar jo'natish"), KeyboardButton(text="🏷 Userni belgilash")],
+        [KeyboardButton(text="⚙️ Userbot menyusi"), KeyboardButton(text="📚 Qo'llanma")]
     ]
     if int(user_id) == int(config.ADMIN_ID):
         buttons.append([KeyboardButton(text="📊 Admin Panel")])
@@ -126,60 +197,137 @@ def get_main_keyboard(user_id: int):
 @dp.message(F.text == "/start")
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
+    
+    bot_info = await bot.get_me()
+    inline_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="➕ Botni guruhga qo'shish", 
+            url=f"https://t.me/{bot_info.username}?startgroup=true"
+        )]
+    ])
+    
     await message.answer(
         f"Assalomu alaykum, {html.bold(message.from_user.full_name)}! 👋\n\n"
-        "Men profilingiz nomidan guruhlarga xabar yuboruvchi va a'zolarni otmetka qiluvchi botman.\n"
-        "💡 Guruh ichida **.utagbot** deb yozsangiz, bot to'g'ridan-to'g'ri o'sha guruhda ishlaydi!",
+        "Men profilingiz nomidan guruhlarda otmetka qiluvchi va xabar yuboruvchi botman.\n\n"
+        "💡 Guruh ichida **`;utag`** deb yozsangiz, bot boshqaruv menyusini guruhda chiqaradi!",
+        reply_markup=inline_kb
+    )
+    
+    await message.answer(
+        "Quyidagi menyulardan foydalanishingiz mumkin:",
         reply_markup=get_main_keyboard(message.from_user.id)
     )
 
 
-# --- GURUH ICHIDA AIOGRAM BUYRUG'INI TUSHLASH (.utagbot yoki /utagbot) ---
-@dp.message((F.text.startswith(".utagbot")) | (F.text.startswith("/utagbot")))
-async def cmd_group_utag_aiogram(message: Message):
-    if message.chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
+# --- GURUH MENYUSI HANDLERLARI (EKSKLYUZIV) ---
+
+@dp.callback_query(F.data.startswith("gtag_"))
+async def handle_group_menu_callbacks(callback: CallbackQuery, state: FSMContext):
+    chat_id = callback.message.chat.id
+    user_id = callback.from_user.id
+
+    if chat_id not in group_sessions:
+        await callback.answer("❌ Bu seans eskirgan. Qaytadan ;utag yuboring.", show_alert=True)
         return
 
+    session = group_sessions[chat_id]
+
+    # TEKSHIRUV: Buyruq bergan user bilan tugmani bosgan user bir xilmi?
+    if user_id != session["caller_id"]:
+        await callback.answer("🔒 Bu menyu faqat buyruq bergan foydalanuvchi uchun!", show_alert=True)
+        return
+
+    action = callback.data.split("_")[1]
+    safe_caller_name = escape_markdown_v1(session.get("caller_name", "Foydalanuvchi"))
+
+    if action == "text":
+        await callback.message.answer(f"📝 [{safe_caller_name}](tg://user?id={user_id}), otmetka uchun sarlavha matnini yuboring:", parse_mode="markdown")
+        await state.set_state(GroupTagSession.waiting_for_text)
+        await state.update_data(target_chat_id=chat_id)
+        await callback.answer()
+
+    elif action == "limit":
+        await callback.message.answer(f"🔢 [{safe_caller_name}](tg://user?id={user_id}), nechta user otmetka qilinsin? Son kiriting (masalan: `20`) yoki `all` deb yozing:", parse_mode="markdown")
+        await state.set_state(GroupTagSession.waiting_for_limit)
+        await state.update_data(target_chat_id=chat_id)
+        await callback.answer()
+
+    elif action == "start":
+        await execute_group_tag(chat_id, user_id)
+        await callback.answer()
+
+    elif action == "stop":
+        if user_id in tag_jobs:
+            tag_jobs[user_id]["status"] = "stopped"
+            await callback.message.answer("🛑 **Otmetka jarayoni to'xtatildi.**")
+        else:
+            await callback.message.answer("Faol otmetka topilmadi.")
+        await callback.answer()
+
+
+@dp.message(GroupTagSession.waiting_for_text)
+async def process_group_text_input(message: Message, state: FSMContext):
+    data = await state.get_data()
+    chat_id = data.get("target_chat_id")
     user_id = message.from_user.id
-    if user_id not in running_userbots:
-        await message.reply("⚠️ Sizda userbot faol emas! Avval shaxsiy chatingizda botga kirib `/start` bosing va userbotni ulang.")
+
+    if chat_id in group_sessions and group_sessions[chat_id]["caller_id"] == user_id:
+        group_sessions[chat_id]["text"] = message.text
+        safe_text = escape_markdown_v1(message.text)
+        await message.reply(f"✅ **Sarlavha o'rnatildi:** `{safe_text}`", parse_mode="markdown")
+    await state.clear()
+
+
+@dp.message(GroupTagSession.waiting_for_limit)
+async def process_group_limit_input(message: Message, state: FSMContext):
+    data = await state.get_data()
+    chat_id = data.get("target_chat_id")
+    user_id = message.from_user.id
+    text = message.text.strip().lower()
+
+    if chat_id in group_sessions and group_sessions[chat_id]["caller_id"] == user_id:
+        if text.isdigit():
+            group_sessions[chat_id]["limit"] = int(text)
+            await message.reply(f"✅ **Limit o'rnatildi:** `{text} ta`", parse_mode="markdown")
+        else:
+            group_sessions[chat_id]["limit"] = "all"
+            await message.reply("✅ **Limit o'rnatildi:** `Hammasi`", parse_mode="markdown")
+    await state.clear()
+
+
+async def execute_group_tag(chat_id: int, user_id: int):
+    if chat_id not in group_sessions:
         return
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Otmetkani boshlash", callback_data=f"tag_to_{message.chat.id}")],
-        [InlineKeyboardButton(text="📢 Xabar yuborishni boshlash", callback_data=f"send_to_{message.chat.id}")]
-    ])
+    session = group_sessions[chat_id]
+    tag_text = session["text"]
+    limit = session["limit"]
 
-    await message.reply(
-        "⚙️ **Guruh boshqaruv menyusi:**\nQuyidagi amallardan birini tanlang:",
-        reply_markup=keyboard,
+    if user_id in tag_jobs:
+        tag_jobs[user_id]["status"] = "stopped"
+
+    tag_jobs[user_id] = {
+        "status": "running",
+        "text": tag_text,
+        "limit": limit,
+        "chat_id": chat_id,
+        "current_step": 0
+    }
+
+    display_text = escape_markdown_v1(tag_text) if tag_text else "Matnsiz"
+    display_limit = "Hammasi" if limit == "all" else f"{limit} ta"
+
+    await bot.send_message(
+        chat_id,
+        f"⚡️ **Otmetka boshlandi!**\n📝 Sarlavha: `{display_text}`\n🔢 Limit: `{display_limit}`",
         parse_mode="markdown"
     )
 
-
-@dp.message(F.text == "⚙️ Userbot menyusi")
-async def userbot_menu(message: Message):
-    user_id = message.from_user.id
-    if user_id in running_userbots:
-        keyboard = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="🚀 Guruhga xabar jo'natish")],
-                [KeyboardButton(text="🏷 Userni belgilash")],
-                [KeyboardButton(text="❌ Userbotni o'chirish")],
-                [KeyboardButton(text="⬅️ Orqaga")]
-            ],
-            resize_keyboard=True
-        )
-        await message.answer("✅ Sizning userbotingiz faol holatda. Quyidagi bo'limni tanlang:", reply_markup=keyboard)
-    else:
-        keyboard = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="📱 Userbotni ulash")], [KeyboardButton(text="⬅️ Orqaga")]],
-            resize_keyboard=True
-        )
-        await message.answer("Sizda hali userbot ulanmagan. Profilingizni ulashingiz mumkin:", reply_markup=keyboard)
+    asyncio.create_task(background_tagging_task(user_id))
 
 
-# --- GURUHGA XABAR YUBORISH (MAILING) ---
+# --- BOTNING SHAXSIY CHATIDAGI HANDLERLARI ---
+
 @dp.message(F.text == "🚀 Guruhga xabar jo'natish")
 async def start_mailing_process(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -187,7 +335,7 @@ async def start_mailing_process(message: Message, state: FSMContext):
         await message.answer("Avval userbotni ulashingiz kerak!")
         return
 
-    await bot.send_message(user_id, "1️⃣ Guruhga yubormoqchi bo'lgan **matningizni** kiriting:", parse_mode="markdown")
+    await message.answer("1️⃣ Guruhga yubormoqchi bo'lgan **matningizni** kiriting:", parse_mode="markdown")
     await state.set_state(MailingState.waiting_for_text)
 
 
@@ -198,8 +346,7 @@ async def process_mailing_text(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="♾ Cheksiz yuborish", callback_data="loop_infinite")]
     ])
     await message.answer(
-        "2️⃣ Xabar nechta yuborilsin? \n\n"
-        "Son kiriting (masalan: `10`, `50`) yoki quyidagi **Cheksiz yuborish** tugmasini bosing:",
+        "2️⃣ Xabar nechta yuborilsin? \n\nSon kiriting yoki tugmani bosing:",
         reply_markup=keyboard,
         parse_mode="markdown"
     )
@@ -217,13 +364,12 @@ async def process_infinite_callback(callback: CallbackQuery, state: FSMContext):
 async def process_loop_count_text(message: Message, state: FSMContext):
     text = message.text.strip()
     if not text.isdigit():
-        await message.answer("Iltimos, faqat butun son kiriting yoki tugmani bosing!")
+        await message.answer("Iltimos, faqat butun son kiriting!")
         return
     await state.update_data(loop_count=int(text))
     await ask_for_groups(message, state, mode="mail")
 
 
-# --- USERNI BELGILASH (TAG) ---
 @dp.message(F.text == "🏷 Userni belgilash")
 async def start_tag_process(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -234,10 +380,8 @@ async def start_tag_process(message: Message, state: FSMContext):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏭ Matnsiz (O'tkazib yuborish)", callback_data="skip_tag_text")]
     ])
-    await bot.send_message(
-        user_id,
-        "1️⃣ Atmetka bilan birga yuboriladigan **sarlavha matnini** kiriting:\n\n"
-        "_(Agar sarlavha kerak bo'lmasa, pastdagi tugmani bosing)_",
+    await message.answer(
+        "1️⃣ Otmetka sarlavha matnini kiriting:",
         reply_markup=keyboard,
         parse_mode="markdown"
     )
@@ -262,8 +406,7 @@ async def ask_tag_limit(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="♾ Hammani belgilash", callback_data="tag_all_users")]
     ])
     await message.answer(
-        "2️⃣ Nechta user atmetka qilinsin?\n\n"
-        "Son kiriting (masalan: `10`, `50`) yoki hammani atmetka qilish uchun quyidagi tugmani bosing:",
+        "2️⃣ Nechta user atmetka qilinsin? Son kiriting yoki tugmani bosing:",
         reply_markup=keyboard,
         parse_mode="markdown"
     )
@@ -281,7 +424,7 @@ async def tag_all_callback(callback: CallbackQuery, state: FSMContext):
 async def process_tag_limit(message: Message, state: FSMContext):
     text = message.text.strip()
     if not text.isdigit():
-        await message.answer("Iltimos, faqat butun son kiriting yoki tugmani bosing!")
+        await message.answer("Iltimos, faqat butun son kiriting!")
         return
     await state.update_data(tag_limit=int(text))
     await ask_for_groups(message, state, mode="tag")
@@ -289,10 +432,14 @@ async def process_tag_limit(message: Message, state: FSMContext):
 
 async def ask_for_groups(message: Message, state: FSMContext, mode="mail"):
     user_id = message.chat.id
+    if user_id not in running_userbots:
+        await message.answer("❌ Userbotingiz faol emas. Qayta ulashingiz kerak.")
+        await state.clear()
+        return
+
     cl = running_userbots[user_id]
-    
     await message.answer("🔄 Profilingizdagi guruhlar yuklanmoqda...")
-    
+
     inline_keyboard = []
     prefix = "send_to_" if mode == "mail" else "tag_to_"
     try:
@@ -301,7 +448,7 @@ async def ask_for_groups(message: Message, state: FSMContext, mode="mail"):
                 title = dialog.chat.title[:25]
                 inline_keyboard.append([InlineKeyboardButton(text=f"👥 {title}", callback_data=f"{prefix}{dialog.chat.id}")])
     except Exception as e:
-        await message.answer(f"Guruhlarni yuklashda xatolik yuz berdi: {e}")
+        await message.answer(f"Guruhlarni yuklashda xatolik: {e}")
         await state.clear()
         return
 
@@ -311,30 +458,16 @@ async def ask_for_groups(message: Message, state: FSMContext, mode="mail"):
         return
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-    await message.answer("3️⃣ Amaliyot bajarilishi kerak bo'lgan guruhingizni tanlang:", reply_markup=keyboard)
+    await message.answer("3️⃣ Guruhingizni tanlang:", reply_markup=keyboard)
 
 
-def get_control_panel(status="running", job_type="mail"):
-    buttons = []
-    prefix = "mail_" if job_type == "mail" else "tag_"
-    
-    if status == "running":
-        buttons.append(InlineKeyboardButton(text="⏸ Pause", callback_data=f"{prefix}pause"))
-    elif status == "paused":
-        buttons.append(InlineKeyboardButton(text="▶️ Resume", callback_data=f"{prefix}resume"))
-        
-    buttons.append(InlineKeyboardButton(text="🛑 Stop", callback_data=f"{prefix}stop"))
-    buttons.append(InlineKeyboardButton(text="📝 Edit Message", callback_data=f"{prefix}edit"))
-    
-    return InlineKeyboardMarkup(inline_keyboard=[buttons])
+# --- BACKGROUND TASKS (MAILING & TAGGING) ---
 
-
-# --- BACKGROUND TASKS ---
 @dp.callback_query(F.data.startswith("send_to_"))
 async def start_mailing_job(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     target_chat_id = int(callback.data.split("_")[2])
-    
+
     data = await state.get_data()
     mailing_text = data.get("mailing_text", "Assalomu alaykum!")
     loop_count = data.get("loop_count", 10)
@@ -350,46 +483,41 @@ async def start_mailing_job(callback: CallbackQuery, state: FSMContext):
         "chat_id": target_chat_id,
         "current_step": 0
     }
-    
-    await callback.message.answer(
-        f"🚀 **Xabar yuborish boshlandi!**\n\nMatn: `{mailing_text}`\nLimit: `{loop_count}`",
-        reply_markup=get_control_panel("running", "mail"),
-        parse_mode="markdown"
-    )
+
+    safe_text = escape_markdown_v1(mailing_text)
+    await callback.message.answer(f"🚀 **Xabar yuborish boshlandi!**\n\nMatn: `{safe_text}`", parse_mode="markdown")
     await callback.answer()
     asyncio.create_task(background_mailing_task(user_id))
 
 
 async def background_mailing_task(user_id: int):
+    if user_id not in running_userbots:
+        await bot.send_message(user_id, "⚠️ Userbotingiz faol emas. Qayta ulashingiz kerak.")
+        return
+
     cl = running_userbots[user_id]
-    
+
     while user_id in mailing_jobs:
         job = mailing_jobs[user_id]
-        
+
         if job["status"] == "stopped":
             del mailing_jobs[user_id]
             break
-            
-        if job["status"] == "paused":
-            await asyncio.sleep(0.5)
-            continue
-            
+
         loop_count = job.get("loop_count")
         if loop_count != "infinite" and isinstance(loop_count, int) and job["current_step"] >= loop_count:
-            await bot.send_message(user_id, "✅ **Belgilangan miqdordagi xabarlar yuborib bo'lindi!**")
+            await bot.send_message(user_id, "✅ **Xabarlar yuborib bo'lindi!**")
             del mailing_jobs[user_id]
             break
-            
+
         try:
             await cl.send_message(job["chat_id"], job["text"])
             job["current_step"] += 1
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
         except Exception as e:
-            await bot.send_message(user_id, f"⚠️ Xabar yuborishda xatolik: {e}")
+            await bot.send_message(user_id, f"⚠️ Xatolik: {e}")
             del mailing_jobs[user_id]
             break
-            
+
         await asyncio.sleep(1.0)
 
 
@@ -397,7 +525,7 @@ async def background_mailing_task(user_id: int):
 async def start_tagging_job(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     target_chat_id = int(callback.data.split("_")[2])
-    
+
     data = await state.get_data()
     tag_text = data.get("tag_text", "")
     tag_limit = data.get("tag_limit", "all")
@@ -413,32 +541,34 @@ async def start_tagging_job(callback: CallbackQuery, state: FSMContext):
         "chat_id": target_chat_id,
         "current_step": 0
     }
-    
-    display_text = "Matnsiz (Faqat Nik/Username)" if tag_text == "NO_TEXT" else tag_text
-    display_limit = "Hammasi" if tag_limit == "all" else f"{tag_limit} ta"
-    
-    await callback.message.answer(
-        f"⚡️ **Belgilash boshlandi (Tezlik: 1 sek/msg)!**\n\nSarlavha: `{display_text}`\nLimit: `{display_limit}`",
-        reply_markup=get_control_panel("running", "tag"),
-        parse_mode="markdown"
-    )
+
+    await callback.message.answer("⚡️ **Belgilash boshlandi!**", parse_mode="markdown")
     await callback.answer()
     asyncio.create_task(background_tagging_task(user_id))
 
 
 async def background_tagging_task(user_id: int):
+    if user_id not in running_userbots:
+        await bot.send_message(user_id, "⚠️ Userbotingiz faol emas. Qayta ulashingiz kerak.")
+        return
+
     cl = running_userbots[user_id]
-    
+
     if user_id not in tag_jobs:
         return
 
     job = tag_jobs[user_id]
     chat_id = job["chat_id"]
     limit = job["limit"]
-    
+
     try:
+        try:
+            await cl.get_chat(chat_id)
+        except Exception:
+            pass
+
         me = await cl.get_me()
-        
+
         members = []
         async for member in cl.get_chat_members(chat_id):
             if member.user and not member.user.is_bot and not member.user.is_deleted:
@@ -450,12 +580,9 @@ async def background_tagging_task(user_id: int):
 
         for u in members:
             if user_id not in tag_jobs or tag_jobs[user_id]["status"] == "stopped":
-                await bot.send_message(user_id, "🛑 **Belgilash jarayoni to'xtatildi.**")
+                await bot.send_message(user_id, "🛑 **Otmetka to'xtatildi.**")
                 if user_id in tag_jobs: del tag_jobs[user_id]
                 return
-
-            while user_id in tag_jobs and tag_jobs[user_id]["status"] == "paused":
-                await asyncio.sleep(0.5)
 
             if u.username:
                 tag_mention = f"@{u.username}"
@@ -464,7 +591,8 @@ async def background_tagging_task(user_id: int):
                 tag_mention = f"[{clean_name}](tg://user?id={u.id})"
 
             header = tag_jobs[user_id]["text"]
-            msg_text = f"📢 **{header}**\n\n{tag_mention}" if header else tag_mention
+            safe_header = escape_markdown_v1(header) if header else ""
+            msg_text = f"📢 **{safe_header}**\n\n{tag_mention}" if safe_header else tag_mention
 
             try:
                 await cl.send_message(chat_id, msg_text.strip(), parse_mode=ParseMode.MARKDOWN)
@@ -476,103 +604,34 @@ async def background_tagging_task(user_id: int):
 
             await asyncio.sleep(1.0)
 
-        await bot.send_message(
-            user_id, 
-            f"⚡️ **A'zolar muvaffaqiyatli belgilandi!**\nJami: `{job['current_step']}` ta foydalanuvchi otmetka qilindi.",
-            parse_mode="markdown"
-        )
+        await bot.send_message(user_id, f"⚡️ **Otmetka yakunlandi!** Jami: `{job['current_step']}` ta.")
 
     except Exception as e:
-        await bot.send_message(user_id, f"⚠️ Belgilashda xatolik yuz berdi: {e}")
+        await bot.send_message(user_id, f"⚠️ Xatolik: {e}")
 
     if user_id in tag_jobs:
         del tag_jobs[user_id]
 
 
-# --- TUGMA WORKERLARI ---
-@dp.callback_query(F.data.in_({"mail_pause", "tag_pause"}))
-async def action_pause(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    job_type = "mail" if callback.data == "mail_pause" else "tag"
-    jobs_dict = mailing_jobs if job_type == "mail" else tag_jobs
-    
-    if user_id in jobs_dict:
-        jobs_dict[user_id]["status"] = "paused"
-        await callback.message.edit_reply_markup(reply_markup=get_control_panel("paused", job_type))
-        await callback.answer("Jarayon pauzaga qo'yildi.")
-    else:
-        await callback.answer("Faol jarayon topilmadi.", show_alert=True)
+# --- SOZLAMALAR VA AUTHENTICATION ---
 
-
-@dp.callback_query(F.data.in_({"mail_resume", "tag_resume"}))
-async def action_resume(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    job_type = "mail" if callback.data == "mail_resume" else "tag"
-    jobs_dict = mailing_jobs if job_type == "mail" else tag_jobs
-    
-    if user_id in jobs_dict:
-        jobs_dict[user_id]["status"] = "running"
-        await callback.message.edit_reply_markup(reply_markup=get_control_panel("running", job_type))
-        await callback.answer("Jarayon davom ettirilmoqda...")
-    else:
-        await callback.answer("Faol jarayon topilmadi.", show_alert=True)
-
-
-@dp.callback_query(F.data.in_({"mail_stop", "tag_stop"}))
-async def action_stop(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    job_type = "mail" if callback.data == "mail_stop" else "tag"
-    jobs_dict = mailing_jobs if job_type == "mail" else tag_jobs
-    
-    if user_id in jobs_dict:
-        jobs_dict[user_id]["status"] = "stopped"
-        await callback.message.edit_text("🛑 **Jarayon to'xtatildi.**")
-        await callback.answer("To'xtatildi.")
-    else:
-        await callback.answer("Faol jarayon topilmadi.", show_alert=True)
-
-
-@dp.callback_query(F.data.in_({"mail_edit", "tag_edit"}))
-async def action_edit_request(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    job_type = "mail" if callback.data == "mail_edit" else "tag"
-    jobs_dict = mailing_jobs if job_type == "mail" else tag_jobs
-    
-    if user_id not in jobs_dict:
-        await callback.answer("Faol jarayon topilmadi.", show_alert=True)
-        return
-        
-    await callback.message.answer("📝 Yangi matnni kiriting:")
-    if job_type == "mail":
-        await state.set_state(MailingState.waiting_for_edit_text)
-    else:
-        await state.set_state(TagState.waiting_for_edit_text)
-    await callback.answer()
-
-
-@dp.message(MailingState.waiting_for_edit_text)
-async def process_edited_mail_text(message: Message, state: FSMContext):
+@dp.message(F.text == "⚙️ Userbot menyusi")
+async def userbot_menu(message: Message):
     user_id = message.from_user.id
-    if user_id in mailing_jobs:
-        mailing_jobs[user_id]["text"] = message.text
-        await message.answer("✅ **Xabar matni yangilandi!**")
+    if user_id in running_userbots:
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="❌ Userbotni o'chirish")], [KeyboardButton(text="⬅️ Orqaga")]],
+            resize_keyboard=True
+        )
+        await message.answer("✅ Sizning userbotingiz faol holatda.", reply_markup=keyboard)
     else:
-        await message.answer("Tahrirlashga faol sikl topilmadi.")
-    await state.clear()
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="📱 Userbotni ulash")], [KeyboardButton(text="⬅️ Orqaga")]],
+            resize_keyboard=True
+        )
+        await message.answer("Sizda hali userbot ulanmagan:", reply_markup=keyboard)
 
 
-@dp.message(TagState.waiting_for_edit_text)
-async def process_edited_tag_text(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    if user_id in tag_jobs:
-        tag_jobs[user_id]["text"] = message.text
-        await message.answer("✅ **Atmetka sarlavhasi yangilandi!**")
-    else:
-        await message.answer("Tahrirlashga faol sikl topilmadi.")
-    await state.clear()
-
-
-# --- AUTHENTICATION VA ADMIN PANEL ---
 @dp.message(F.text == "📱 Userbotni ulash")
 async def start_auth(message: Message, state: FSMContext):
     await message.answer("Iltimos, Telegram raqamingizni kiriting:\nFormat: `+998901234567`", parse_mode="markdown")
@@ -582,10 +641,19 @@ async def start_auth(message: Message, state: FSMContext):
 @dp.message(UserbotAuth.waiting_for_phone)
 async def process_phone(message: Message, state: FSMContext):
     phone = message.text.strip().replace(" ", "")
+    user_id = message.from_user.id
+
+    if user_id in active_auth_clients:
+        try:
+            await active_auth_clients[user_id]["client"].disconnect()
+        except Exception:
+            pass
+        del active_auth_clients[user_id]
+
     await state.update_data(phone=phone)
     await message.answer("Telegramdan tasdiqlash kodi so'ralmoqda...")
     client = Client(
-        name=f"auth_{message.from_user.id}",
+        name=f"auth_{user_id}",
         api_id=config.API_ID,
         api_hash=config.API_HASH,
         in_memory=True,
@@ -594,7 +662,7 @@ async def process_phone(message: Message, state: FSMContext):
     await client.connect()
     try:
         code_info = await client.send_code(phone)
-        active_auth_clients[message.from_user.id] = {"client": client, "phone_code_hash": code_info.phone_code_hash}
+        active_auth_clients[user_id] = {"client": client, "phone_code_hash": code_info.phone_code_hash}
         await message.answer("⚠️ **Kodni raqamlar orasiga nuqta qo'yib yuboring!** (Masalan: `5.4.3.2.1`)", parse_mode="markdown")
         await state.set_state(UserbotAuth.waiting_for_code)
     except Exception as e:
@@ -607,55 +675,81 @@ async def process_phone(message: Message, state: FSMContext):
 async def process_code(message: Message, state: FSMContext):
     user_id = message.from_user.id
     code = message.text.strip().replace(".", "").replace(" ", "").replace("-", "")
+
     if user_id not in active_auth_clients:
+        await message.answer("❌ Seans eskirgan. Qaytadan /start bosing.")
         await state.clear()
         return
+
     data = await state.get_data()
-    phone = data['phone']
+    phone = data.get('phone')
     client = active_auth_clients[user_id]["client"]
     phone_code_hash = active_auth_clients[user_id]["phone_code_hash"]
+
     try:
         await client.sign_in(phone, phone_code_hash, code)
         session_string = await client.export_session_string()
-        database.save_session(user_id, phone, session_string)
-        await message.answer("✅ Userbot muvaffaqiyatli ulandi va faollashtirildi!", reply_markup=get_main_keyboard(user_id))
-        await start_userbot_worker(user_id, session_string)
+
         await client.disconnect()
         del active_auth_clients[user_id]
+
+        database.save_session(user_id, phone, session_string)
+        await start_userbot_worker(user_id, session_string)
+
+        await message.answer("✅ Userbot ulandi!", reply_markup=get_main_keyboard(user_id))
         await state.clear()
     except SessionPasswordNeeded:
         await message.answer("2FA parolingizni kiriting:")
         await state.set_state(UserbotAuth.waiting_for_password)
-    except Exception:
-        await message.answer("Kod noto'g'ri. Qaytadan kiriting:")
+    except Exception as e:
+        logging.error(f"Kod xatosi: {e}")
+        await message.answer("❌ Kod noto'g'ri. Qaytadan kiriting:")
 
 
 @dp.message(UserbotAuth.waiting_for_password)
 async def process_password(message: Message, state: FSMContext):
     user_id = message.from_user.id
     password = message.text.strip()
+
+    if user_id not in active_auth_clients:
+        await message.answer("❌ Seans eskirgan. Qaytadan /start bosing.")
+        await state.clear()
+        return
+
     client = active_auth_clients[user_id]["client"]
     data = await state.get_data()
-    phone = data['phone']
+    phone = data.get('phone')
+
     try:
         await client.check_password(password)
         session_string = await client.export_session_string()
-        database.save_session(user_id, phone, session_string)
-        await message.answer("✅ Userbot muvaffaqiyatli ulandi.", reply_markup=get_main_keyboard(user_id))
-        await start_userbot_worker(user_id, session_string)
+    except Exception as e:
+        logging.error(f"2FA Parol xatosi: {e}")
+        await message.answer("❌ Noto'g'ri parol. Qayta urinib ko'ring:")
+        return
+
+    try:
         await client.disconnect()
         del active_auth_clients[user_id]
+
+        database.save_session(user_id, phone, session_string)
+        await start_userbot_worker(user_id, session_string)
+
+        await message.answer("✅ Userbot ulandi!", reply_markup=get_main_keyboard(user_id))
         await state.clear()
-    except Exception:
-        await message.answer("Noto'g'ri parol. Qayta urinib ko'ring:")
+    except Exception as e:
+        logging.error(f"Workerni yurgizishda xatolik: {e}")
+        await message.answer(f"⚠️ Xatolik: {e}")
 
 
 @dp.message(F.text == "❌ Userbotni o'chirish")
 async def stop_userbot(message: Message):
     user_id = message.from_user.id
     if user_id in running_userbots:
-        try: await running_userbots[user_id].stop()
-        except Exception: pass
+        try:
+            await running_userbots[user_id].stop()
+        except Exception:
+            pass
         del running_userbots[user_id]
         database.delete_session(user_id)
         await message.answer("Userbot o'chirildi.", reply_markup=get_main_keyboard(user_id))
@@ -663,7 +757,7 @@ async def stop_userbot(message: Message):
 
 @dp.message(F.text == "📊 Admin Panel")
 async def admin_panel(message: Message):
-    if int(message.from_user.id) != int(config.ADMIN_ID): 
+    if int(message.from_user.id) != int(config.ADMIN_ID):
         return
     total_users = database.get_users_count()
     users_list = database.get_users_list()
@@ -680,9 +774,9 @@ async def admin_panel(message: Message):
 async def cmd_guide(message: Message):
     await message.answer(
         "📚 **Qo'llanma:**\n\n"
-        "1. **Userbot menyusi** orqali raqamingizni ulang (Kodni nuqta bilan yuboring).\n"
-        "2. **Guruh ichida ishlatish:** Har qanday guruhda `.utagbot Matn` yoki `.utagbot` deb yozsangiz, userbot o'sha guruh a'zolarini darhol tag qilishni boshlaydi.\n"
-        "3. Guruh ichida `/utagbot` deb yozsangiz, bot sizga boshqaruv menyusini chiqarib beradi.",
+        "1. Guruhda **`;utag`** deb yozing. Bot menyuni shu guruhga yuboradi.\n"
+        "2. Menyudagi tugmalarni faqat buyruq bergan odam bosishi mumkin.\n"
+        "3. Botning shaxsiy chatidan ham xabar yuborish va otmetka qilish menyularidan foydalanishingiz mumkin.",
         parse_mode="markdown"
     )
 
