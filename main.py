@@ -20,7 +20,7 @@ from aiogram.types import (
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from pyrogram import Client
+from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ParseMode
 from pyrogram.errors import SessionPasswordNeeded, FloodWait
 
@@ -68,8 +68,46 @@ async def start_userbot_worker(user_id: int, session_string: str):
         api_id=config.API_ID,
         api_hash=config.API_HASH,
         session_string=session_string,
-        no_updates=True  # Background update xatoliklarini to'xtatish
+        no_updates=False  # Guruhdagi .utagbot buyrug'ini eshitish uchun True emas, False qilindi
     )
+    
+    # --- PYROGRAM HANDLER: Guruh ichida .utagbot deb yozilganda ishlaydi ---
+    @client.on_message(filters.command(["utagbot", "tag"], prefixes=".") & (filters.group | filters.supergroup))
+    async def group_utag_trigger(cl: Client, message):
+        chat_id = message.chat.id
+        owner_id = user_id
+        
+        # Userbot egasi yoki admin ekanligini tekshirish
+        if message.from_user and message.from_user.id != owner_id:
+            return
+
+        # Buyruq matnini ajratib olish (Masalan: .utagbot Salom hammaga)
+        args = message.text.split(maxsplit=1)
+        header_text = args[1] if len(args) > 1 else ""
+
+        if owner_id in tag_jobs:
+            tag_jobs[owner_id]["status"] = "stopped"
+
+        tag_jobs[owner_id] = {
+            "status": "running",
+            "text": header_text,
+            "limit": "all",
+            "chat_id": chat_id,
+            "current_step": 0
+        }
+
+        # Telegram guruhidagi buyruq xabarini o'chirib tashlash (xohishga ko'ra)
+        try: await message.delete()
+        except Exception: pass
+
+        control_msg = await bot.send_message(
+            chat_id=chat_id,
+            text=f"⚡️ **Guruhda otmetka qilish boshlandi!**\nSarlavha: `{header_text or 'Matnsiz'}`",
+            reply_markup=get_control_panel("running", "tag"),
+            parse_mode="markdown"
+        )
+        asyncio.create_task(background_tagging_task(owner_id))
+
     await client.start()
     running_userbots[user_id] = client
     logging.info(f"Userbot worker muvaffaqiyatli yoqildi: {user_id}")
@@ -90,8 +128,32 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         f"Assalomu alaykum, {html.bold(message.from_user.full_name)}! 👋\n\n"
-        "Men profilingiz nomidan guruhlarga xabar yuboruvchi va a'zolarni otmetka qiluvchi botman.",
+        "Men profilingiz nomidan guruhlarga xabar yuboruvchi va a'zolarni otmetka qiluvchi botman.\n"
+        "💡 Guruh ichida **.utagbot** deb yozsangiz, bot to'g'ridan-to'g'ri o'sha guruhda ishlaydi!",
         reply_markup=get_main_keyboard(message.from_user.id)
+    )
+
+
+# --- GURUH ICHIDA AIOGRAM BUYRUG'INI TUSHLASH (.utagbot yoki /utagbot) ---
+@dp.message((F.text.startswith(".utagbot")) | (F.text.startswith("/utagbot")))
+async def cmd_group_utag_aiogram(message: Message):
+    if message.chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
+        return
+
+    user_id = message.from_user.id
+    if user_id not in running_userbots:
+        await message.reply("⚠️ Sizda userbot faol emas! Avval shaxsiy chatingizda botga kirib `/start` bosing va userbotni ulang.")
+        return
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Otmetkani boshlash", callback_data=f"tag_to_{message.chat.id}")],
+        [InlineKeyboardButton(text="📢 Xabar yuborishni boshlash", callback_data=f"send_to_{message.chat.id}")]
+    ])
+
+    await message.reply(
+        "⚙️ **Guruh boshqaruv menyusi:**\nQuyidagi amallardan birini tanlang:",
+        reply_markup=keyboard,
+        parse_mode="markdown"
     )
 
 
@@ -124,10 +186,6 @@ async def start_mailing_process(message: Message, state: FSMContext):
     if user_id not in running_userbots:
         await message.answer("Avval userbotni ulashingiz kerak!")
         return
-    
-    if message.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
-        try: await message.delete()
-        except Exception: pass
 
     await bot.send_message(user_id, "1️⃣ Guruhga yubormoqchi bo'lgan **matningizni** kiriting:", parse_mode="markdown")
     await state.set_state(MailingState.waiting_for_text)
@@ -172,10 +230,6 @@ async def start_tag_process(message: Message, state: FSMContext):
     if user_id not in running_userbots:
         await message.answer("Avval userbotni ulashingiz kerak!")
         return
-    
-    if message.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
-        try: await message.delete()
-        except Exception: pass
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏭ Matnsiz (O'tkazib yuborish)", callback_data="skip_tag_text")]
@@ -282,13 +336,9 @@ async def start_mailing_job(callback: CallbackQuery, state: FSMContext):
     target_chat_id = int(callback.data.split("_")[2])
     
     data = await state.get_data()
-    mailing_text = data.get("mailing_text")
-    loop_count = data.get("loop_count")
+    mailing_text = data.get("mailing_text", "Assalomu alaykum!")
+    loop_count = data.get("loop_count", 10)
     await state.clear()
-    
-    if not mailing_text or loop_count is None:
-        await callback.answer("❌ Seans eskirgan. Qaytadan urinib ko'ring.", show_alert=True)
-        return
 
     if user_id in mailing_jobs:
         mailing_jobs[user_id]["status"] = "stopped"
@@ -340,7 +390,6 @@ async def background_mailing_task(user_id: int):
             del mailing_jobs[user_id]
             break
             
-        # HAR 1 SONIYADA 1 TA XABAR:
         await asyncio.sleep(1.0)
 
 
@@ -350,13 +399,9 @@ async def start_tagging_job(callback: CallbackQuery, state: FSMContext):
     target_chat_id = int(callback.data.split("_")[2])
     
     data = await state.get_data()
-    tag_text = data.get("tag_text")
-    tag_limit = data.get("tag_limit")
+    tag_text = data.get("tag_text", "")
+    tag_limit = data.get("tag_limit", "all")
     await state.clear()
-    
-    if tag_text is None or tag_limit is None:
-        await callback.answer("❌ Seans eskirgan. Qaytadan urinib ko'ring.", show_alert=True)
-        return
 
     if user_id in tag_jobs:
         tag_jobs[user_id]["status"] = "stopped"
@@ -394,7 +439,6 @@ async def background_tagging_task(user_id: int):
     try:
         me = await cl.get_me()
         
-        # A'zolarni saralash
         members = []
         async for member in cl.get_chat_members(chat_id):
             if member.user and not member.user.is_bot and not member.user.is_deleted:
@@ -413,7 +457,6 @@ async def background_tagging_task(user_id: int):
             while user_id in tag_jobs and tag_jobs[user_id]["status"] == "paused":
                 await asyncio.sleep(0.5)
 
-            # USERNAME BOR BO'LSA - USERNAME, YO'Q BO'LSA - ISMI (NIKI) BILAN ATMETKA
             if u.username:
                 tag_mention = f"@{u.username}"
             else:
@@ -431,7 +474,6 @@ async def background_tagging_task(user_id: int):
             except Exception as e:
                 logging.error(f"Tag yuborishda xato: {e}")
 
-            # HAR 1 SONIYADA 1 TA ATMETKA MESSAGE:
             await asyncio.sleep(1.0)
 
         await bot.send_message(
@@ -639,9 +681,8 @@ async def cmd_guide(message: Message):
     await message.answer(
         "📚 **Qo'llanma:**\n\n"
         "1. **Userbot menyusi** orqali raqamingizni ulang (Kodni nuqta bilan yuboring).\n"
-        "2. **Guruhga xabar jo'natish** — Matn va sonini kiritib guruhga yuborasiz.\n"
-        "3. **Userni belgilash** — Har bir a'zoga alohida soniyasiga 1 tadan otmetka qiladi.\n"
-        "4. Jarayon davomida **Pause, Resume, Stop, Edit** tugmalari bilan boshqarishingiz mumkin.",
+        "2. **Guruh ichida ishlatish:** Har qanday guruhda `.utagbot Matn` yoki `.utagbot` deb yozsangiz, userbot o'sha guruh a'zolarini darhol tag qilishni boshlaydi.\n"
+        "3. Guruh ichida `/utagbot` deb yozsangiz, bot sizga boshqaruv menyusini chiqarib beradi.",
         parse_mode="markdown"
     )
 
