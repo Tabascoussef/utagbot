@@ -1049,7 +1049,8 @@ async def on_startup():
 
 async def main():
     await on_startup()
-    await dp.start_polling(bot)
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
