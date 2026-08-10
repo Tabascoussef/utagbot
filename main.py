@@ -82,6 +82,40 @@ def get_group_menu_keyboard():
     ])
 
 
+def get_group_control_keyboard(status: str = "running", user_id: int = 0):
+    """Guruh ichida otmetka jarayonini boshqarish tugmalari (Pauza, Davom ettirish, To'xtatish)"""
+    if status == "running":
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⏸ Pauza", callback_data=f"gtag_pause_{user_id}"),
+                InlineKeyboardButton(text="🛑 To'xtatish", callback_data=f"gtag_stop_{user_id}")
+            ]
+        ])
+    else:  # "paused"
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="▶️ Davom ettirish", callback_data=f"gtag_resume_{user_id}"),
+                InlineKeyboardButton(text="🛑 To'xtatish", callback_data=f"gtag_stop_{user_id}")
+            ]
+        ])
+
+
+def get_control_panel(status="running", job_type="mail"):
+    """Botning shaxsiy chatida jarayonni boshqarish paneli"""
+    buttons = []
+    prefix = "mail_" if job_type == "mail" else "tag_"
+
+    if status == "running":
+        buttons.append(InlineKeyboardButton(text="⏸ Pauza", callback_data=f"{prefix}pause"))
+    elif status == "paused":
+        buttons.append(InlineKeyboardButton(text="▶️ Davom ettirish", callback_data=f"{prefix}resume"))
+
+    buttons.append(InlineKeyboardButton(text="🛑 To'xtatish", callback_data=f"{prefix}stop"))
+    buttons.append(InlineKeyboardButton(text="📝 Tahrirlash", callback_data=f"{prefix}edit"))
+
+    return InlineKeyboardMarkup(inline_keyboard=[buttons])
+
+
 async def start_userbot_worker(user_id: int, session_string: str):
     if user_id in running_userbots:
         return
@@ -94,8 +128,8 @@ async def start_userbot_worker(user_id: int, session_string: str):
         no_updates=False
     )
 
-    # GURUHDA ;utag CHAQRILGANDA ISHLAYDIGAN HANDLER
-    @client.on_message(filters.group & filters.command(["utag"], prefixes=";"))
+    # GURUHDA ;utag YOKI .utag CHAQRILGANDA ISHLAYDIGAN HANDLER
+    @client.on_message(filters.group & filters.command(["utag", "tag"], prefixes=[";", ".", "!"]))
     async def handle_semicolon_utag(cl: Client, message):
         sender_id = message.from_user.id if message.from_user else None
         chat_id = message.chat.id
@@ -113,7 +147,11 @@ async def start_userbot_worker(user_id: int, session_string: str):
             logging.error(f"Userbot ma'lumotlarini olishda xato: {e}")
             return
 
-        # Guruhdagi ;utag xabarini o'chirish
+        # Buyruqdan keyingi matn (agar bo'lsa)
+        args = message.text.split(maxsplit=1) if message.text else []
+        initial_text = args[1].strip() if len(args) > 1 else ""
+
+        # Guruhdagi buyruq xabarini o'chirish
         try:
             await message.delete()
         except Exception:
@@ -123,12 +161,13 @@ async def start_userbot_worker(user_id: int, session_string: str):
         group_sessions[chat_id] = {
             "caller_id": sender_id,
             "caller_name": message.from_user.first_name or "Foydalanuvchi",
-            "text": "",
+            "text": initial_text,
             "limit": "all"
         }
 
         safe_chat_title = escape_markdown_v1(chat_title)
         safe_first_name = escape_markdown_v1(message.from_user.first_name or "Foydalanuvchi")
+        display_initial_text = escape_markdown_v1(initial_text) if initial_text else "Matnsiz"
 
         # Boshqaruv menyusini GURUHGA yuborish
         try:
@@ -138,7 +177,7 @@ async def start_userbot_worker(user_id: int, session_string: str):
                     f"⚙️ **{safe_chat_title}** uchun otmetka menyusi\n"
                     f"👤 Buyruq beruvchi: [{safe_first_name}](tg://user?id={sender_id})\n\n"
                     f"📌 **Joriy sozlama:**\n"
-                    f"• Sarlavha: `Matnsiz`\n"
+                    f"• Sarlavha: `{display_initial_text}`\n"
                     f"• Limit: `Hammasi`\n\n"
                     f"🔒 *Ushbu menyu tugmalaridan faqat {safe_first_name} foydalana oladi!*"
                 ),
@@ -147,7 +186,7 @@ async def start_userbot_worker(user_id: int, session_string: str):
             )
         except Exception as e:
             logging.error(f"Guruhga menyu yuborishda xato: {e}")
-            
+
             # Bot username'ini aniqlash va PYROGRAM tugmasini yaratish
             try:
                 bot_info = await bot.get_me()
@@ -225,7 +264,71 @@ async def cmd_start(message: Message, state: FSMContext):
 async def handle_group_menu_callbacks(callback: CallbackQuery, state: FSMContext):
     chat_id = callback.message.chat.id
     user_id = callback.from_user.id
+    data_parts = callback.data.split("_")
+    action = data_parts[1]
+    
+    # Callbackdan target_user_id ni olish (masalan: gtag_pause_123456)
+    target_user_id = int(data_parts[2]) if len(data_parts) > 2 and data_parts[2].isdigit() else None
 
+    # Guruh seansi va buyruq egasi
+    session = group_sessions.get(chat_id)
+    caller_id = target_user_id or (session["caller_id"] if session else None)
+
+    # 1. Pauza / Davom ettirish / To'xtatish amallari
+    if action in ["pause", "resume", "stop"]:
+        # Agar buyruq beruvchi aniq bo'lsa va bosgan odam boshqa bo'lsa
+        if caller_id and user_id != caller_id:
+            await callback.answer("🔒 Bu tugmadan faqat otmetka boshlagan foydalanuvchi foydalana oladi!", show_alert=True)
+            return
+
+        effective_user_id = caller_id or user_id
+
+        if action == "pause":
+            if effective_user_id in tag_jobs and tag_jobs[effective_user_id]["status"] == "running":
+                tag_jobs[effective_user_id]["status"] = "paused"
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=get_group_control_keyboard("paused", effective_user_id))
+                except Exception:
+                    pass
+                await callback.answer("⏸ Otmetka vaqtincha to'xtatildi (Pauza).")
+            else:
+                await callback.answer("Faol otmetka topilmadi yoki allaqachon to'xtatilgan.", show_alert=True)
+            return
+
+        elif action == "resume":
+            if effective_user_id in tag_jobs and tag_jobs[effective_user_id]["status"] == "paused":
+                tag_jobs[effective_user_id]["status"] = "running"
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=get_group_control_keyboard("running", effective_user_id))
+                except Exception:
+                    pass
+                await callback.answer("▶️ Otmetka davom ettirilmoqda...")
+            else:
+                await callback.answer("Faol otmetka topilmadi.", show_alert=True)
+            return
+
+        elif action == "stop":
+            if effective_user_id in tag_jobs:
+                step = tag_jobs[effective_user_id].get("current_step", 0)
+                tag_jobs[effective_user_id]["status"] = "stopped"
+                del tag_jobs[effective_user_id]
+                try:
+                    await callback.message.edit_text(
+                        f"🛑 **Otmetka jarayoni to'xtatildi.**\n📊 Jami: `{step}` ta a'zo belgilandi.",
+                        parse_mode="markdown"
+                    )
+                except Exception:
+                    pass
+                await callback.answer("🛑 Otmetka to'xtatildi.")
+            else:
+                try:
+                    await callback.message.edit_text("🛑 **Otmetka to'xtatildi.**", parse_mode="markdown")
+                except Exception:
+                    pass
+                await callback.answer("Faol otmetka topilmadi.")
+            return
+
+    # 2. Boshqa menyu amallari (text, limit, start) uchun session mavjudligi shart
     if chat_id not in group_sessions:
         await callback.answer("❌ Bu seans eskirgan. Qaytadan ;utag yuboring.", show_alert=True)
         return
@@ -237,7 +340,6 @@ async def handle_group_menu_callbacks(callback: CallbackQuery, state: FSMContext
         await callback.answer("🔒 Bu menyu faqat buyruq bergan foydalanuvchi uchun!", show_alert=True)
         return
 
-    action = callback.data.split("_")[1]
     safe_caller_name = escape_markdown_v1(session.get("caller_name", "Foydalanuvchi"))
 
     if action == "text":
@@ -254,14 +356,6 @@ async def handle_group_menu_callbacks(callback: CallbackQuery, state: FSMContext
 
     elif action == "start":
         await execute_group_tag(chat_id, user_id)
-        await callback.answer()
-
-    elif action == "stop":
-        if user_id in tag_jobs:
-            tag_jobs[user_id]["status"] = "stopped"
-            await callback.message.answer("🛑 **Otmetka jarayoni to'xtatildi.**")
-        else:
-            await callback.message.answer("Faol otmetka topilmadi.")
         await callback.answer()
 
 
@@ -302,6 +396,7 @@ async def execute_group_tag(chat_id: int, user_id: int):
     session = group_sessions[chat_id]
     tag_text = session["text"]
     limit = session["limit"]
+    caller_name = session.get("caller_name", "Foydalanuvchi")
 
     if user_id in tag_jobs:
         tag_jobs[user_id]["status"] = "stopped"
@@ -316,10 +411,18 @@ async def execute_group_tag(chat_id: int, user_id: int):
 
     display_text = escape_markdown_v1(tag_text) if tag_text else "Matnsiz"
     display_limit = "Hammasi" if limit == "all" else f"{limit} ta"
+    safe_caller_name = escape_markdown_v1(caller_name)
 
     await bot.send_message(
-        chat_id,
-        f"⚡️ **Otmetka boshlandi!**\n📝 Sarlavha: `{display_text}`\n🔢 Limit: `{display_limit}`",
+        chat_id=chat_id,
+        text=(
+            f"⚡️ **Otmetka boshlandi!**\n"
+            f"📝 Sarlavha: `{display_text}`\n"
+            f"🔢 Limit: `{display_limit}`\n"
+            f"👤 Boshqaruvchi: [{safe_caller_name}](tg://user?id={user_id})\n\n"
+            f"🔒 *Jarayonni quyidagi tugmalar orqali boshqarishingiz mumkin:*"
+        ),
+        reply_markup=get_group_control_keyboard("running", user_id),
         parse_mode="markdown"
     )
 
@@ -485,36 +588,57 @@ async def start_mailing_job(callback: CallbackQuery, state: FSMContext):
     }
 
     safe_text = escape_markdown_v1(mailing_text)
-    await callback.message.answer(f"🚀 **Xabar yuborish boshlandi!**\n\nMatn: `{safe_text}`", parse_mode="markdown")
+    display_count = "Cheksiz" if loop_count == "infinite" else f"{loop_count} ta"
+    await callback.message.answer(
+        f"🚀 **Xabar yuborish boshlandi!**\n\n📝 Matn: `{safe_text}`\n🔢 Soni: `{display_count}`",
+        reply_markup=get_control_panel("running", "mail"),
+        parse_mode="markdown"
+    )
     await callback.answer()
     asyncio.create_task(background_mailing_task(user_id))
 
 
 async def background_mailing_task(user_id: int):
     if user_id not in running_userbots:
-        await bot.send_message(user_id, "⚠️ Userbotingiz faol emas. Qayta ulashingiz kerak.")
+        try:
+            await bot.send_message(user_id, "⚠️ Userbotingiz faol emas. Qayta ulashingiz kerak.")
+        except Exception:
+            pass
         return
 
     cl = running_userbots[user_id]
 
     while user_id in mailing_jobs:
-        job = mailing_jobs[user_id]
+        # Pauza holatini tekshirish
+        while user_id in mailing_jobs and mailing_jobs[user_id]["status"] == "paused":
+            await asyncio.sleep(0.5)
 
-        if job["status"] == "stopped":
-            del mailing_jobs[user_id]
+        # To'xtatilganlikni tekshirish
+        if user_id not in mailing_jobs or mailing_jobs[user_id]["status"] == "stopped":
+            if user_id in mailing_jobs:
+                del mailing_jobs[user_id]
             break
 
+        job = mailing_jobs[user_id]
         loop_count = job.get("loop_count")
         if loop_count != "infinite" and isinstance(loop_count, int) and job["current_step"] >= loop_count:
-            await bot.send_message(user_id, "✅ **Xabarlar yuborib bo'lindi!**")
+            try:
+                await bot.send_message(user_id, "✅ **Xabarlar yuborib bo'lindi!**")
+            except Exception:
+                pass
             del mailing_jobs[user_id]
             break
 
         try:
             await cl.send_message(job["chat_id"], job["text"])
             job["current_step"] += 1
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
         except Exception as e:
-            await bot.send_message(user_id, f"⚠️ Xatolik: {e}")
+            try:
+                await bot.send_message(user_id, f"⚠️ Xatolik: {e}")
+            except Exception:
+                pass
             del mailing_jobs[user_id]
             break
 
@@ -542,14 +666,120 @@ async def start_tagging_job(callback: CallbackQuery, state: FSMContext):
         "current_step": 0
     }
 
-    await callback.message.answer("⚡️ **Belgilash boshlandi!**", parse_mode="markdown")
+    safe_text = escape_markdown_v1(tag_text) if tag_text and tag_text != "NO_TEXT" else "Matnsiz"
+    display_limit = "Hammasi" if tag_limit == "all" else f"{tag_limit} ta"
+    await callback.message.answer(
+        f"⚡️ **Otmetka qilish boshlandi!**\n\n📝 Sarlavha: `{safe_text}`\n🔢 Limit: `{display_limit}`",
+        reply_markup=get_control_panel("running", "tag"),
+        parse_mode="markdown"
+    )
     await callback.answer()
     asyncio.create_task(background_tagging_task(user_id))
 
 
+# --- SHAXSIY CHATDAGI BOSHQARUV TUGMALARI HANDLERLARI ---
+
+@dp.callback_query(F.data.in_({"mail_pause", "tag_pause"}))
+async def action_pause(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    job_type = "mail" if callback.data == "mail_pause" else "tag"
+    jobs_dict = mailing_jobs if job_type == "mail" else tag_jobs
+
+    if user_id in jobs_dict and jobs_dict[user_id]["status"] == "running":
+        jobs_dict[user_id]["status"] = "paused"
+        try:
+            await callback.message.edit_reply_markup(reply_markup=get_control_panel("paused", job_type))
+        except Exception:
+            pass
+        await callback.answer("⏸ Jarayon vaqtincha to'xtatildi (Pauza).")
+    else:
+        await callback.answer("Faol jarayon topilmadi yoki allaqachon to'xtatilgan.", show_alert=True)
+
+
+@dp.callback_query(F.data.in_({"mail_resume", "tag_resume"}))
+async def action_resume(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    job_type = "mail" if callback.data == "mail_resume" else "tag"
+    jobs_dict = mailing_jobs if job_type == "mail" else tag_jobs
+
+    if user_id in jobs_dict and jobs_dict[user_id]["status"] == "paused":
+        jobs_dict[user_id]["status"] = "running"
+        try:
+            await callback.message.edit_reply_markup(reply_markup=get_control_panel("running", job_type))
+        except Exception:
+            pass
+        await callback.answer("▶️ Jarayon davom ettirilmoqda...")
+    else:
+        await callback.answer("Faol jarayon topilmadi.", show_alert=True)
+
+
+@dp.callback_query(F.data.in_({"mail_stop", "tag_stop"}))
+async def action_stop(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    job_type = "mail" if callback.data == "mail_stop" else "tag"
+    jobs_dict = mailing_jobs if job_type == "mail" else tag_jobs
+
+    if user_id in jobs_dict:
+        step = jobs_dict[user_id].get("current_step", 0)
+        jobs_dict[user_id]["status"] = "stopped"
+        del jobs_dict[user_id]
+        try:
+            await callback.message.edit_text(f"🛑 **Jarayon to'xtatildi.** (Jami: `{step}` ta)", parse_mode="markdown")
+        except Exception:
+            pass
+        await callback.answer("🛑 To'xtatildi.")
+    else:
+        await callback.answer("Faol jarayon topilmadi.", show_alert=True)
+
+
+@dp.callback_query(F.data.in_({"mail_edit", "tag_edit"}))
+async def action_edit_request(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    job_type = "mail" if callback.data == "mail_edit" else "tag"
+    jobs_dict = mailing_jobs if job_type == "mail" else tag_jobs
+
+    if user_id not in jobs_dict:
+        await callback.answer("Faol jarayon topilmadi.", show_alert=True)
+        return
+
+    await callback.message.answer("📝 Yangi matnni kiriting:")
+    if job_type == "mail":
+        await state.set_state(MailingState.waiting_for_edit_text)
+    else:
+        await state.set_state(TagState.waiting_for_edit_text)
+    await callback.answer()
+
+
+@dp.message(MailingState.waiting_for_edit_text)
+async def process_edited_mail_text(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if user_id in mailing_jobs:
+        mailing_jobs[user_id]["text"] = message.text
+        safe_text = escape_markdown_v1(message.text)
+        await message.answer(f"✅ **Xabar matni yangilandi:** `{safe_text}`", parse_mode="markdown")
+    else:
+        await message.answer("Tahrirlashga faol sikl topilmadi.")
+    await state.clear()
+
+
+@dp.message(TagState.waiting_for_edit_text)
+async def process_edited_tag_text(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    if user_id in tag_jobs:
+        tag_jobs[user_id]["text"] = message.text
+        safe_text = escape_markdown_v1(message.text)
+        await message.answer(f"✅ **Otmetka sarlavhasi yangilandi:** `{safe_text}`", parse_mode="markdown")
+    else:
+        await message.answer("Tahrirlashga faol sikl topilmadi.")
+    await state.clear()
+
+
 async def background_tagging_task(user_id: int):
     if user_id not in running_userbots:
-        await bot.send_message(user_id, "⚠️ Userbotingiz faol emas. Qayta ulashingiz kerak.")
+        try:
+            await bot.send_message(user_id, "⚠️ Userbotingiz faol emas. Qayta ulashingiz kerak.")
+        except Exception:
+            pass
         return
 
     cl = running_userbots[user_id]
@@ -579,9 +809,14 @@ async def background_tagging_task(user_id: int):
             members = members[:limit]
 
         for u in members:
+            # Pauza holatini tekshirish
+            while user_id in tag_jobs and tag_jobs[user_id]["status"] == "paused":
+                await asyncio.sleep(0.5)
+
+            # To'xtatilganlikni tekshirish
             if user_id not in tag_jobs or tag_jobs[user_id]["status"] == "stopped":
-                await bot.send_message(user_id, "🛑 **Otmetka to'xtatildi.**")
-                if user_id in tag_jobs: del tag_jobs[user_id]
+                if user_id in tag_jobs:
+                    del tag_jobs[user_id]
                 return
 
             if u.username:
@@ -604,10 +839,26 @@ async def background_tagging_task(user_id: int):
 
             await asyncio.sleep(1.0)
 
-        await bot.send_message(user_id, f"⚡️ **Otmetka yakunlandi!** Jami: `{job['current_step']}` ta.")
+        # Otmetka muvaffaqiyatli yakunlanganda
+        if user_id in tag_jobs and tag_jobs[user_id]["status"] == "running":
+            final_step = job.get("current_step", 0)
+            if chat_id:
+                try:
+                    await bot.send_message(chat_id, f"✅ **Otmetka yakunlandi!**\n📊 Jami: `{final_step}` ta a'zo belgilandi.", parse_mode="markdown")
+                except Exception:
+                    pass
+            if user_id != chat_id:
+                try:
+                    await bot.send_message(user_id, f"⚡️ **Otmetka yakunlandi!** Jami: `{final_step}` ta.")
+                except Exception:
+                    pass
 
     except Exception as e:
-        await bot.send_message(user_id, f"⚠️ Xatolik: {e}")
+        logging.error(f"Background tagging task error: {e}")
+        try:
+            await bot.send_message(user_id, f"⚠️ Xatolik: {e}")
+        except Exception:
+            pass
 
     if user_id in tag_jobs:
         del tag_jobs[user_id]
@@ -774,9 +1025,10 @@ async def admin_panel(message: Message):
 async def cmd_guide(message: Message):
     await message.answer(
         "📚 **Qo'llanma:**\n\n"
-        "1. Guruhda **`;utag`** deb yozing. Bot menyuni shu guruhga yuboradi.\n"
-        "2. Menyudagi tugmalarni faqat buyruq bergan odam bosishi mumkin.\n"
-        "3. Botning shaxsiy chatidan ham xabar yuborish va otmetka qilish menyularidan foydalanishingiz mumkin.",
+        "1. **Userbot menyusi** orqali telefon raqamingizni ulang (Kodni nuqta bilan yuboring).\n"
+        "2. **Guruh ichida ishlatish:** Guruhda **`;utag`** yoki **`.utag`** deb yozsangiz, bot sozlash va boshqaruv menyusini yuboradi.\n"
+        "3. **Boshqaruv tugmalari:** Otmetka davomida **⏸ Pauza**, **▶️ Davom ettirish** va **🛑 To'xtatish** tugmalari orqali jarayonni to'liq nazorat qilishingiz mumkin.\n"
+        "4. **Shaxsiy chatdan:** Botning o'zidan ham xabar yuborish va foydalanuvchilarni belgilash imkoniyati mavjud.",
         parse_mode="markdown"
     )
 
