@@ -839,11 +839,7 @@ async def background_tagging_task(user_id: int):
         if isinstance(limit, int):
             members = members[:limit]
 
-        # 5 tadan qilib otmetka qilish (Telegram spam blokiga tushmaslik va sessiya uzilmasligi uchun)
-        batch_size = 5
-        for i in range(0, len(members), batch_size):
-            batch = members[i:i + batch_size]
-
+        for u in members:
             # Pauza / To'xtatilganlik holatini xavfsiz tekshirish
             while True:
                 if user_id not in tag_jobs or tag_jobs[user_id].get("status") == "stopped":
@@ -857,22 +853,19 @@ async def background_tagging_task(user_id: int):
             if not current_job or current_job.get("status") == "stopped":
                 return
 
-            mentions = []
-            for u in batch:
-                if u.username:
-                    mentions.append(f"@{u.username}")
-                else:
-                    clean_name = escape_markdown_v1(u.first_name or "Foydalanuvchi")
-                    mentions.append(f"[{clean_name}](tg://user?id={u.id})")
+            if u.username:
+                tag_mention = f"@{u.username}"
+            else:
+                clean_name = escape_markdown_v1(u.first_name or "Foydalanuvchi")
+                tag_mention = f"[{clean_name}](tg://user?id={u.id})"
 
             header = current_job.get("text", "")
             safe_header = escape_markdown_v1(header) if header else ""
-            mentions_text = "  ".join(mentions)
-            msg_text = f"📢 **{safe_header}**\n\n{mentions_text}" if safe_header else mentions_text
+            msg_text = f"📢 **{safe_header}**\n\n{tag_mention}" if safe_header else tag_mention
 
             try:
                 await cl.send_message(chat_id, msg_text.strip(), parse_mode=ParseMode.MARKDOWN)
-                current_job["current_step"] += len(batch)
+                current_job["current_step"] += 1
             except FloodWait as e:
                 logging.warning(f"FloodWait: {e.value} soniya kutilmoqda...")
                 await asyncio.sleep(e.value)
@@ -889,8 +882,8 @@ async def background_tagging_task(user_id: int):
             except Exception as e:
                 logging.error(f"Tag yuborishda xato: {e}")
 
-            # Telegram xavfsizligi va spam himoyasi uchun oraliq kutish vaqti
-            await asyncio.sleep(2.5)
+            # Oraliq kutish vaqti
+            await asyncio.sleep(1.5)
 
         # Otmetka muvaffaqiyatli yakunlanganda
         if user_id in tag_jobs and tag_jobs[user_id].get("status") == "running":
