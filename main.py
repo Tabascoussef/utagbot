@@ -22,7 +22,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ParseMode
-from pyrogram.errors import SessionPasswordNeeded, FloodWait
+from pyrogram.errors import (
+    SessionPasswordNeeded,
+    FloodWait,
+    AuthKeyUnregistered,
+    AuthKeyInvalid,
+    UserDeactivated,
+    UserDeactivatedBan,
+    Unauthorized
+)
 from pyrogram.types import (
     InlineKeyboardMarkup as PyroInlineKeyboardMarkup,
     InlineKeyboardButton as PyroInlineKeyboardButton
@@ -125,6 +133,7 @@ async def start_userbot_worker(user_id: int, session_string: str):
         api_id=config.API_ID,
         api_hash=config.API_HASH,
         session_string=session_string,
+        in_memory=True,
         no_updates=False
     )
 
@@ -209,8 +218,17 @@ async def start_userbot_worker(user_id: int, session_string: str):
 
     try:
         await client.start()
+    except (AuthKeyUnregistered, AuthKeyInvalid, UserDeactivated, UserDeactivatedBan, Unauthorized) as e:
+        logging.warning(f"⚠️ User {user_id} sessiyasi bekor qilingan ({e.__class__.__name__}). Bazadan avtomatik o'chirildi.")
+        database.delete_session(user_id)
+        return
     except Exception as e:
-        logging.error(f"Userbot worker start xatosi (User {user_id}): {e}")
+        err_msg = str(e)
+        if "AUTH_KEY_UNREGISTERED" in err_msg or "401" in err_msg or "USER_DEACTIVATED" in err_msg:
+            logging.warning(f"⚠️ User {user_id} sessiyasi yaroqsiz ({err_msg}). Bazadan avtomatik o'chirildi.")
+            database.delete_session(user_id)
+        else:
+            logging.error(f"Userbot worker start xatosi (User {user_id}): {e}")
         return
 
     try:
@@ -311,7 +329,6 @@ async def handle_group_menu_callbacks(callback: CallbackQuery, state: FSMContext
             if effective_user_id in tag_jobs:
                 step = tag_jobs[effective_user_id].get("current_step", 0)
                 tag_jobs[effective_user_id]["status"] = "stopped"
-                del tag_jobs[effective_user_id]
                 try:
                     await callback.message.edit_text(
                         f"🛑 **Otmetka jarayoni to'xtatildi.**\n📊 Jami: `{step}` ta a'zo belgilandi.",
@@ -608,41 +625,56 @@ async def background_mailing_task(user_id: int):
 
     cl = running_userbots[user_id]
 
-    while user_id in mailing_jobs:
-        # Pauza holatini tekshirish
-        while user_id in mailing_jobs and mailing_jobs[user_id]["status"] == "paused":
-            await asyncio.sleep(0.5)
+    try:
+        while True:
+            # Pauza / To'xtatilganlik holatini xavfsiz tekshirish
+            while True:
+                if user_id not in mailing_jobs or mailing_jobs[user_id].get("status") == "stopped":
+                    return
+                if mailing_jobs[user_id].get("status") == "paused":
+                    await asyncio.sleep(0.5)
+                else:
+                    break
 
-        # To'xtatilganlikni tekshirish
-        if user_id not in mailing_jobs or mailing_jobs[user_id]["status"] == "stopped":
-            if user_id in mailing_jobs:
-                del mailing_jobs[user_id]
-            break
+            job = mailing_jobs.get(user_id)
+            if not job or job.get("status") == "stopped":
+                return
 
-        job = mailing_jobs[user_id]
-        loop_count = job.get("loop_count")
-        if loop_count != "infinite" and isinstance(loop_count, int) and job["current_step"] >= loop_count:
+            loop_count = job.get("loop_count")
+            if loop_count != "infinite" and isinstance(loop_count, int) and job.get("current_step", 0) >= loop_count:
+                try:
+                    await bot.send_message(user_id, "✅ **Xabarlar yuborib bo'lindi!**")
+                except Exception:
+                    pass
+                return
+
             try:
-                await bot.send_message(user_id, "✅ **Xabarlar yuborib bo'lindi!**")
-            except Exception:
-                pass
-            del mailing_jobs[user_id]
-            break
+                await cl.send_message(job["chat_id"], job["text"])
+                job["current_step"] += 1
+            except FloodWait as e:
+                logging.warning(f"Mailing FloodWait: {e.value} soniya kutilmoqda...")
+                await asyncio.sleep(e.value)
+            except (AuthKeyUnregistered, AuthKeyInvalid, UserDeactivated, Unauthorized) as e:
+                logging.warning(f"User {user_id} sessiyasi bekor qilindi: {e}")
+                database.delete_session(user_id)
+                if user_id in running_userbots:
+                    del running_userbots[user_id]
+                try:
+                    await bot.send_message(user_id, "⚠️ Telegram sessiyangiz bekor qilindi. Iltimos, userbotni qayta ulang.")
+                except Exception:
+                    pass
+                return
+            except Exception as e:
+                try:
+                    await bot.send_message(user_id, f"⚠️ Xatolik: {e}")
+                except Exception:
+                    pass
+                return
 
-        try:
-            await cl.send_message(job["chat_id"], job["text"])
-            job["current_step"] += 1
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
-        except Exception as e:
-            try:
-                await bot.send_message(user_id, f"⚠️ Xatolik: {e}")
-            except Exception:
-                pass
+            await asyncio.sleep(2.0)
+    finally:
+        if user_id in mailing_jobs:
             del mailing_jobs[user_id]
-            break
-
-        await asyncio.sleep(1.0)
 
 
 @dp.callback_query(F.data.startswith("tag_to_"))
@@ -722,7 +754,6 @@ async def action_stop(callback: CallbackQuery):
     if user_id in jobs_dict:
         step = jobs_dict[user_id].get("current_step", 0)
         jobs_dict[user_id]["status"] = "stopped"
-        del jobs_dict[user_id]
         try:
             await callback.message.edit_text(f"🛑 **Jarayon to'xtatildi.** (Jami: `{step}` ta)", parse_mode="markdown")
         except Exception:
@@ -808,40 +839,62 @@ async def background_tagging_task(user_id: int):
         if isinstance(limit, int):
             members = members[:limit]
 
-        for u in members:
-            # Pauza holatini tekshirish
-            while user_id in tag_jobs and tag_jobs[user_id]["status"] == "paused":
-                await asyncio.sleep(0.5)
+        # 5 tadan qilib otmetka qilish (Telegram spam blokiga tushmaslik va sessiya uzilmasligi uchun)
+        batch_size = 5
+        for i in range(0, len(members), batch_size):
+            batch = members[i:i + batch_size]
 
-            # To'xtatilganlikni tekshirish
-            if user_id not in tag_jobs or tag_jobs[user_id]["status"] == "stopped":
-                if user_id in tag_jobs:
-                    del tag_jobs[user_id]
+            # Pauza / To'xtatilganlik holatini xavfsiz tekshirish
+            while True:
+                if user_id not in tag_jobs or tag_jobs[user_id].get("status") == "stopped":
+                    return
+                if tag_jobs[user_id].get("status") == "paused":
+                    await asyncio.sleep(0.5)
+                else:
+                    break
+
+            current_job = tag_jobs.get(user_id)
+            if not current_job or current_job.get("status") == "stopped":
                 return
 
-            if u.username:
-                tag_mention = f"@{u.username}"
-            else:
-                clean_name = escape_markdown_v1(u.first_name or "Foydalanuvchi")
-                tag_mention = f"[{clean_name}](tg://user?id={u.id})"
+            mentions = []
+            for u in batch:
+                if u.username:
+                    mentions.append(f"@{u.username}")
+                else:
+                    clean_name = escape_markdown_v1(u.first_name or "Foydalanuvchi")
+                    mentions.append(f"[{clean_name}](tg://user?id={u.id})")
 
-            header = tag_jobs[user_id]["text"]
+            header = current_job.get("text", "")
             safe_header = escape_markdown_v1(header) if header else ""
-            msg_text = f"📢 **{safe_header}**\n\n{tag_mention}" if safe_header else tag_mention
+            mentions_text = "  ".join(mentions)
+            msg_text = f"📢 **{safe_header}**\n\n{mentions_text}" if safe_header else mentions_text
 
             try:
                 await cl.send_message(chat_id, msg_text.strip(), parse_mode=ParseMode.MARKDOWN)
-                job["current_step"] += 1
+                current_job["current_step"] += len(batch)
             except FloodWait as e:
+                logging.warning(f"FloodWait: {e.value} soniya kutilmoqda...")
                 await asyncio.sleep(e.value)
+            except (AuthKeyUnregistered, AuthKeyInvalid, UserDeactivated, Unauthorized) as e:
+                logging.warning(f"User {user_id} sessiyasi bekor qilindi: {e}")
+                database.delete_session(user_id)
+                if user_id in running_userbots:
+                    del running_userbots[user_id]
+                try:
+                    await bot.send_message(user_id, "⚠️ Telegram sessiyangiz bekor qilindi. Iltimos, userbotni qayta ulang.")
+                except Exception:
+                    pass
+                return
             except Exception as e:
                 logging.error(f"Tag yuborishda xato: {e}")
 
-            await asyncio.sleep(1.0)
+            # Telegram xavfsizligi va spam himoyasi uchun oraliq kutish vaqti
+            await asyncio.sleep(2.5)
 
         # Otmetka muvaffaqiyatli yakunlanganda
-        if user_id in tag_jobs and tag_jobs[user_id]["status"] == "running":
-            final_step = job.get("current_step", 0)
+        if user_id in tag_jobs and tag_jobs[user_id].get("status") == "running":
+            final_step = tag_jobs[user_id].get("current_step", 0)
             if chat_id:
                 try:
                     await bot.send_message(chat_id, f"✅ **Otmetka yakunlandi!**\n📊 Jami: `{final_step}` ta a'zo belgilandi.", parse_mode="markdown")
@@ -859,9 +912,9 @@ async def background_tagging_task(user_id: int):
             await bot.send_message(user_id, f"⚠️ Xatolik: {e}")
         except Exception:
             pass
-
-    if user_id in tag_jobs:
-        del tag_jobs[user_id]
+    finally:
+        if user_id in tag_jobs:
+            del tag_jobs[user_id]
 
 
 # --- SOZLAMALAR VA AUTHENTICATION ---
@@ -1002,8 +1055,8 @@ async def stop_userbot(message: Message):
         except Exception:
             pass
         del running_userbots[user_id]
-        database.delete_session(user_id)
-        await message.answer("Userbot o'chirildi.", reply_markup=get_main_keyboard(user_id))
+    database.delete_session(user_id)
+    await message.answer("Userbot o'chirildi.", reply_markup=get_main_keyboard(user_id))
 
 
 @dp.message(F.text == "📊 Admin Panel")
@@ -1047,10 +1100,25 @@ async def on_startup():
             logging.error(f"Sessiyani yuklashda xato (User {user_id}): {e}")
 
 
+async def on_shutdown():
+    logging.info("Barcha faol userbotlar to'xtatilmoqda...")
+    for user_id, client in list(running_userbots.items()):
+        try:
+            if client.is_connected:
+                await client.stop()
+        except Exception:
+            pass
+    running_userbots.clear()
+    await bot.session.close()
+
+
 async def main():
     await on_startup()
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot, drop_pending_updates=True)
+    try:
+        await dp.start_polling(bot, drop_pending_updates=True)
+    finally:
+        await on_shutdown()
 
 
 if __name__ == "__main__":
