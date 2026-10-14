@@ -1,9 +1,24 @@
 import os
 
-# Serverda (Render.com) Environment Variables orqali o'qiladi.
-# Agar topilmasa, ikkinchi parametrda ko'rsatilgan qiymatlardan foydalaniladi.
-
 API_ID = int(os.getenv("API_ID", "33465516"))
 API_HASH = os.getenv("API_HASH", "8c3c061c71bdbb70da28dc677b13e678")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8901205517:AAGL1pVwusfXbQSXe8biyGQJkyiLWNi8Ink")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "1784313012"))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8901205517:AAECDCJEu7_M1_W6FGjlakmNloZPvyVUJyI")
+
+ADMIN_ID_1 = int(os.getenv("ADMIN_ID_1", "1784313012"))
+ADMIN_ID_2 = int(os.getenv("ADMIN_ID_2", "1052561222"))
+ADMIN_IDS = [ADMIN_ID_1, ADMIN_ID_2]
+ADMIN_ID = ADMIN_ID_1  
+
+
+WEEKLY_STARS = int(os.getenv("WEEKLY_STARS", "50"))     
+MONTHLY_STARS = int(os.getenv("MONTHLY_STARS", "200"))  
+
+
+DEFAULT_SPEED = 2.0
+ALLOWED_SPEEDS = [1.5, 2.0, 3.0, 5.0]
+HARD_TAG_LIMIT = 400                                    
+
+
+WEBAPP_HOST = os.getenv("WEBAPP_HOST", "0.0.0.0")
+WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080"))
+WEBAPP_URL = os.getenv("WEBAPP_URL", "")

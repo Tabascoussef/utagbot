@@ -1,73 +1,503 @@
 import sqlite3
 import logging
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any, Tuple
+import config
 
 DB_NAME = "userbots.db"
 
-def init_db():
-    """Ma'lumotlar bazasini va 'users' jadvalini yaratadi (agar mavjud bo'lmasa)."""
+def get_connection():
+    """SQLite ulanishini qaytaradi."""
     conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    """
+    Ma'lumotlar bazasini va jadvallarni yaratadi / yangilaydi (migratsiya).
+    Sxema:
+      users: user_id, phone, session_string, speed, subscription_end, payment_status, created_at
+      payment_requests: id, user_id, plan, stars, status, proof_file_id, created_at
+    """
+    conn = get_connection()
     cursor = conn.cursor()
+
+    # 1. users jadvalini yaratish
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             phone TEXT NOT NULL,
-            session_string TEXT NOT NULL
+            session_string TEXT NOT NULL,
+            speed REAL DEFAULT 2.0,
+            subscription_end TEXT,
+            payment_status TEXT DEFAULT 'none',
+            created_at TEXT
         )
     """)
+
+    # Mavjud jadvalga yangi ustunlarni xavfsiz qo'shish (migratsiya)
+    cursor.execute("PRAGMA table_info(users)")
+    columns = [row["name"] for row in cursor.fetchall()]
+
+    if "speed" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN speed REAL DEFAULT 2.0")
+    if "subscription_end" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN subscription_end TEXT")
+    if "payment_status" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN payment_status TEXT DEFAULT 'none'")
+    if "created_at" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
+    if "username" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN username TEXT")
+    if "first_name" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN first_name TEXT")
+
+    # 2. payment_requests jadvali (Admin lichkasi orqali to'lov so'rovlari)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payment_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            plan TEXT NOT NULL,
+            stars INTEGER NOT NULL,
+            status TEXT DEFAULT 'pending',
+            proof_file_id TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    # 3. admins jadvali (Yangi tayinlangan adminlar)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admins (
+            user_id INTEGER PRIMARY KEY,
+            added_by INTEGER DEFAULT 0,
+            created_at TEXT
+        )
+    """)
+
     conn.commit()
     conn.close()
-    logging.info("Ma'lumotlar bazasi muvaffaqiyatli ishga tushirildi.")
+    logging.info("Ma'lumotlar bazasi sxemasi muvaffaqiyatli tekshirildi va yangilandi.")
 
 
-def save_session(user_id: int, phone: str, session_string: str):
-    """Foydalanuvchining userbot sessiya ma'lumotlarini saqlaydi yoki yangilaydi."""
-    conn = sqlite3.connect(DB_NAME)
+def update_user_info(user_id: int, username: Optional[str] = None, first_name: Optional[str] = None):
+    """Foydalanuvchining username va ismini bazada saqlaydi yoki yangilaydi."""
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO users (user_id, phone, session_string)
-        VALUES (?, ?, ?)
+        INSERT INTO users (user_id, phone, session_string, username, first_name)
+        VALUES (?, '', '', ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username = CASE WHEN excluded.username IS NOT NULL AND excluded.username != '' THEN excluded.username ELSE users.username END,
+            first_name = CASE WHEN excluded.first_name IS NOT NULL AND excluded.first_name != '' THEN excluded.first_name ELSE users.first_name END
+    """, (user_id, username, first_name))
+    conn.commit()
+    conn.close()
+
+
+def save_session(user_id: int, phone: str, session_string: str, username: Optional[str] = None, first_name: Optional[str] = None):
+    """Foydalanuvchining userbot sessiya ma'lumotlarini saqlaydi yoki yangilaydi."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    cursor.execute("""
+        INSERT INTO users (user_id, phone, session_string, speed, created_at, username, first_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
             phone = excluded.phone,
-            session_string = excluded.session_string
-    """, (user_id, phone, session_string))
+            session_string = excluded.session_string,
+            username = CASE WHEN excluded.username IS NOT NULL THEN excluded.username ELSE users.username END,
+            first_name = CASE WHEN excluded.first_name IS NOT NULL THEN excluded.first_name ELSE users.first_name END
+    """, (user_id, phone, session_string, config.DEFAULT_SPEED, now_str, username, first_name))
     conn.commit()
     conn.close()
 
 
 def delete_session(user_id: int):
-    """Foydalanuvchi userbotini o'chirib tashlaganda bazadan o'chiradi."""
-    conn = sqlite3.connect(DB_NAME)
+    """Foydalanuvchi userbot sessiyasini tozalaydi (obuna va ma'lumotlarni saqlagan holda)."""
+    conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("UPDATE users SET session_string = '', phone = '' WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
 
 
-def get_all_sessions():
-    """Bot qayta ishga tushganida barcha faol sessiyalarni yuklab olish uchun."""
-    conn = sqlite3.connect(DB_NAME)
+def get_saved_session(user_id: int) -> Optional[str]:
+    """Foydalanuvchining bazada saqlangan faol sessiya matnini qaytaradi (agar mavjud bo'lsa)."""
+    conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, session_string FROM users")
+    cursor.execute("SELECT session_string FROM users WHERE user_id = ? AND session_string IS NOT NULL AND TRIM(session_string) != ''", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row["session_string"] if row else None
+
+
+def get_all_sessions() -> List[Tuple[int, str]]:
+    """Bot qayta ishga tushganida barcha faol sessiyalarni yuklab olish uchun."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, session_string FROM users WHERE session_string IS NOT NULL AND TRIM(session_string) != ''")
+    rows = cursor.fetchall()
+    result = [(row["user_id"], row["session_string"]) for row in rows]
+    conn.close()
+    return result
+
+
+def get_user(user_id: int) -> Optional[Dict[str, Any]]:
+    """Foydalanuvchi ma'lumotlarini to'liq oladi."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+# --- TEZLIK (SPEED) SOZLAMALARI ---
+
+def get_user_speed(user_id: int) -> float:
+    """Foydalanuvchining tag yuborish tezligini (soniya) oladi."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT speed FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row and row["speed"] is not None:
+        return float(row["speed"])
+    return config.DEFAULT_SPEED
+
+
+def set_user_speed(user_id: int, speed: float) -> bool:
+    """Foydalanuvchining tag yuborish tezligini yangilaydi (1.5, 2.0, 3.0, 5.0)."""
+    if speed not in config.ALLOWED_SPEEDS:
+        return False
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO users (user_id, phone, session_string, speed)
+        VALUES (?, '', '', ?)
+        ON CONFLICT(user_id) DO UPDATE SET speed = excluded.speed
+    """, (user_id, speed))
+    conn.commit()
+    conn.close()
+    return True
+
+
+# --- OBUNA (SUBSCRIPTION) VA TO'LOV TIZIMI ---
+
+def is_subscribed(user_id: int) -> bool:
+    """
+    Foydalanuvchining obunasi faol ekanligini tekshiradi.
+    Bot admini har doim cheksiz obunaga ega.
+    """
+    if int(user_id) in getattr(config, 'ADMIN_IDS', [config.ADMIN_ID]):
+        return True
+
+    user = get_user(user_id)
+    if not user or not user.get("subscription_end"):
+        return False
+
+    try:
+        sub_end = datetime.strptime(user["subscription_end"], "%Y-%m-%d %H:%M:%S")
+        return sub_end > datetime.now()
+    except Exception:
+        return False
+
+
+def get_subscription_info(user_id: int) -> Dict[str, Any]:
+    """Obuna holati haqida to'liq axborot qaytaradi."""
+    if int(user_id) in getattr(config, 'ADMIN_IDS', [config.ADMIN_ID]):
+        return {
+            "is_active": True,
+            "status": "admin",
+            "end_date": "Cheksiz",
+            "days_left": None,
+            "display_text": "Faol (Cheksiz)"
+        }
+
+    user = get_user(user_id)
+    if not user or not user.get("subscription_end"):
+        return {
+            "is_active": False,
+            "status": "none",
+            "end_date": "Obuna yo'q",
+            "days_left": 0,
+            "display_text": "Obuna yo'q"
+        }
+
+    try:
+        sub_end = datetime.strptime(user["subscription_end"], "%Y-%m-%d %H:%M:%S")
+        now = datetime.now()
+        if sub_end > now:
+            delta = sub_end - now
+            days_left = delta.days if delta.days > 0 else 0
+            return {
+                "is_active": True,
+                "status": user.get("payment_status", "active"),
+                "end_date": sub_end.strftime("%Y-%m-%d %H:%M"),
+                "days_left": days_left,
+                "display_text": f"Faol ({days_left} kun qoldi)"
+            }
+        else:
+            return {
+                "is_active": False,
+                "status": "expired",
+                "end_date": f"Tugagan ({sub_end.strftime('%Y-%m-%d')})",
+                "days_left": 0,
+                "display_text": f"Muddati tugagan"
+            }
+    except Exception:
+        return {
+            "is_active": False,
+            "status": "invalid",
+            "end_date": "Xatolik",
+            "days_left": 0,
+            "display_text": "Noma'lum"
+        }
+
+
+def add_subscription(user_id: int, days: int, payment_type: str = "active") -> str:
+    """
+    Foydalanuvchiga obuna muddati qo'shadi.
+    Agar joriy obunasi faol bo'lsa, mavjud muddat ustiga qo'shiladi.
+    Aks holda hozirgi vaqtdan hisoblanadi.
+    Yangi tugash sanasini qaytaradi.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT subscription_end FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+
+    now = datetime.now()
+    base_time = now
+
+    if row and row["subscription_end"]:
+        try:
+            current_end = datetime.strptime(row["subscription_end"], "%Y-%m-%d %H:%M:%S")
+            if current_end > now:
+                base_time = current_end
+        except Exception:
+            base_time = now
+
+    new_end = base_time + timedelta(days=days)
+    new_end_str = new_end.strftime("%Y-%m-%d %H:%M:%S")
+
+    cursor.execute("""
+        INSERT INTO users (user_id, phone, session_string, subscription_end, payment_status)
+        VALUES (?, '', '', ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            subscription_end = excluded.subscription_end,
+            payment_status = excluded.payment_status
+    """, (user_id, new_end_str, payment_type))
+    conn.commit()
+    conn.close()
+    return new_end_str
+
+
+def remove_subscription(user_id: int):
+    """Foydalanuvchining obunasini bekor qiladi / tozalaydi."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE users
+        SET subscription_end = NULL, payment_status = 'expired'
+        WHERE user_id = ?
+    """, (user_id,))
+    conn.commit()
+    conn.close()
+
+
+# --- TO'LOV SO'ROVLARI (ADMIN APPROVAL) ---
+
+def create_payment_request(user_id: int, plan: str, stars: int, proof_file_id: Optional[str] = None) -> int:
+    """Yangi to'lov so'rovini bazaga kiritadi."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    cursor.execute("""
+        INSERT INTO payment_requests (user_id, plan, stars, status, proof_file_id, created_at)
+        VALUES (?, ?, ?, 'pending', ?, ?)
+    """, (user_id, plan, stars, proof_file_id, now_str))
+    req_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return req_id
+
+
+def get_payment_request(request_id: int) -> Optional[Dict[str, Any]]:
+    """To'lov so'rovi ma'lumotlarini oladi."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM payment_requests WHERE id = ?", (request_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_payment_request_status(request_id: int, status: str) -> bool:
+    """To'lov so'rovi holatini yangilaydi ('approved' yoki 'rejected')."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE payment_requests SET status = ? WHERE id = ?", (status, request_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+# --- ADMIN VA WEB APP UCHUN FUNKSIYALAR ---
+
+def get_stats() -> Dict[str, Any]:
+    """Tizim bo'yicha umumiy statistikani qaytaradi."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) AS total FROM users")
+    total_users = cursor.fetchone()["total"]
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("""
+        SELECT COUNT(*) AS active_subs FROM users
+        WHERE subscription_end IS NOT NULL AND subscription_end > ?
+    """, (now_str,))
+    active_subs = cursor.fetchone()["active_subs"]
+
+    cursor.execute("SELECT COUNT(*) AS pending_requests FROM payment_requests WHERE status = 'pending'")
+    pending_reqs = cursor.fetchone()["pending_requests"]
+
+    conn.close()
+
+    return {
+        "total_users": total_users,
+        "active_subs": active_subs,
+        "expired_subs": max(0, total_users - active_subs),
+        "pending_requests": pending_reqs
+    }
+
+
+def is_super_admin(user_id: int) -> bool:
+    """Foydalanuvchi Bosh Admin (ADMIN_ID_1 yoki ADMIN_ID_2) ekanligini tekshiradi."""
+    try:
+        u_id = int(user_id)
+    except (ValueError, TypeError):
+        return False
+    super_admins = [
+        int(getattr(config, "ADMIN_ID_1", 1784313012)),
+        int(getattr(config, "ADMIN_ID_2", 1052561222))
+    ]
+    return u_id in super_admins
+
+
+def is_admin(user_id: int) -> bool:
+    """Foydalanuvchi Bosh Admin yoki tayinlangan Admin ekanligini tekshiradi."""
+    if is_super_admin(user_id):
+        return True
+    try:
+        u_id = int(user_id)
+    except (ValueError, TypeError):
+        return False
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM admins WHERE user_id = ?", (u_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return bool(row)
+
+
+def add_admin(user_id: int, added_by: int = 0) -> bool:
+    """Foydalanuvchiga admin huquqini beradi."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("""
+        INSERT OR IGNORE INTO admins (user_id, added_by, created_at)
+        VALUES (?, ?, ?)
+    """, (int(user_id), int(added_by), now_str))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def remove_admin(user_id: int) -> bool:
+    """Foydalanuvchidan admin huquqini oladi (Superadminlarni o'chirib bo'lmaydi)."""
+    if is_super_admin(user_id):
+        return False  # Bosh adminlarni o'chirish taqiqlangan!
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM admins WHERE user_id = ?", (int(user_id),))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_all_admin_ids() -> List[int]:
+    """Barcha adminlar (Superadminlar + tayinlanganlar) ro'yxatini qaytaradi."""
+    super_admins = [
+        int(getattr(config, "ADMIN_ID_1", 1784313012)),
+        int(getattr(config, "ADMIN_ID_2", 1052561222))
+    ]
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM admins")
     rows = cursor.fetchall()
     conn.close()
-    return rows
+    extra = [row["user_id"] for row in rows]
+    return list(set(super_admins + extra))
+
+
+def get_all_users_full() -> List[Dict[str, Any]]:
+    """Barcha foydalanuvchilar ro'yxatini to'liq holda qaytaradi."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, phone, speed, subscription_end, payment_status, created_at, username, first_name FROM users")
+    rows = cursor.fetchall()
+    conn.close()
+
+    now = datetime.now()
+    users = []
+    for r in rows:
+        u = dict(r)
+        sub_end = u.get("subscription_end")
+        is_act = False
+        days_left = 0
+        if sub_end:
+            try:
+                dt = datetime.strptime(sub_end, "%Y-%m-%d %H:%M:%S")
+                if dt > now:
+                    is_act = True
+                    days_left = (dt - now).days
+            except Exception:
+                pass
+        u["is_active"] = is_act
+        u["days_left"] = days_left
+        u["is_super_admin"] = is_super_admin(u["user_id"])
+        u["is_admin"] = is_admin(u["user_id"])
+        users.append(u)
+    return users
 
 
 def get_users_count() -> int:
-    """Admin panel uchun: Jami ulangan foydalanuvchilar sonini qaytaradi."""
-    conn = sqlite3.connect(DB_NAME)
+    """Jami ulangan foydalanuvchilar soni."""
+    conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users")
-    count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) AS cnt FROM users")
+    count = cursor.fetchone()["cnt"]
     conn.close()
     return count
 
 
-def get_users_list():
-    """Admin panel uchun: Ulangan barcha foydalanuvchilar ro'yxatini (ID va telefon) qaytaradi."""
-    conn = sqlite3.connect(DB_NAME)
+def get_users_list() -> List[Tuple[int, str]]:
+    """Foydalanuvchilarning ID va telefonlari."""
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT user_id, phone FROM users")
     rows = cursor.fetchall()
     conn.close()
-    return rows
+    return [(row["user_id"], row["phone"]) for row in rows]
+
+
+# Modul yuklanganda bazani va yangi ustunlarni avtomatik initsializatsiya qilish
+try:
+    init_db()
+except Exception as e:
+    logging.warning(f"Database init ogohlantirish: {e}")
