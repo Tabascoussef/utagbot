@@ -2101,20 +2101,12 @@ async def admin_panel(message: Message):
     webapp_url = f"{base_admin}?admin_id={message.from_user.id}"
 
     buttons = []
-    # Telegram faqat HTTPS havolalarga ruxsat beradi
     if webapp_url.startswith("https://"):
-        buttons.append([InlineKeyboardButton(text="🌐 Web App Admin Panelni ochish", web_app=WebAppInfo(url=webapp_url))])
+        buttons.append([InlineKeyboardButton(text="🌐 Web App Admin Panel", web_app=WebAppInfo(url=webapp_url))])
+    elif webapp_url.startswith("http://"):
+        buttons.append([InlineKeyboardButton(text="🌐 Web App Admin Panel", url=webapp_url)])
     
     kb = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
-
-    web_hint = ""
-    if webapp_url.startswith("https://"):
-        web_hint = "\n💡 <i>Telegram Mini App orqali boshqarish uchun quyidagi tugmani bosing:</i>"
-    else:
-        web_hint = (
-            f"\n🌐 <b>Web Panel manzili (Brauzerda oching):</b>\n<code>{webapp_url}</code>\n\n"
-            "💡 <i>Telegram ilovasi ichida ochish uchun config.py dagi WEBAPP_URL ga HTTPS havola (masalan, Render domeni) kiriting.</i>"
-        )
 
     response_text = (
         "<b>UTAG Boshqaruv Paneli:</b>\n\n"
@@ -2122,8 +2114,7 @@ async def admin_panel(message: Message):
         f"• Faol Userbotlar: <code>{len(running_userbots)}</code> ta\n"
         f"• Faol obunalar: <code>{stats['active_subs']}</code> ta\n"
         f"• Obunasi tugaganlar: <code>{stats['expired_subs']}</code> ta\n"
-        f"• Kutilayotgan so'rovlar: <code>{stats['pending_requests']}</code> ta\n"
-        f"{web_hint}"
+        f"• Kutilayotgan so'rovlar: <code>{stats['pending_requests']}</code> ta"
     )
     await message.answer(response_text, reply_markup=kb, parse_mode="HTML")
 

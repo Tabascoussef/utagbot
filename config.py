@@ -21,4 +21,5 @@ HARD_TAG_LIMIT = 400
 
 WEBAPP_HOST = os.getenv("WEBAPP_HOST", "0.0.0.0")
 WEBAPP_PORT = int(os.getenv("PORT", os.getenv("WEBAPP_PORT", "8080")))
-WEBAPP_URL = os.getenv("WEBAPP_URL", "")
+_render_url = os.getenv("RENDER_EXTERNAL_URL") or (f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}" if os.getenv("RENDER_EXTERNAL_HOSTNAME") else "")
+WEBAPP_URL = os.getenv("WEBAPP_URL") or _render_url
