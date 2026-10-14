@@ -2165,14 +2165,17 @@ async def on_startup():
     except Exception as e:
         logging.warning(f"Web App start ogohlantirish: {e}")
 
-    # Avtomatik Cloudflare Tunnel (IP kiritishni to'liq yo'qotish va avtomatik HTTPS uchun)
-    try:
-        tunnel_url = tunnel.start_tunnel_sync(config.WEBAPP_PORT)
-        if tunnel_url:
-            config.WEBAPP_URL = tunnel_url
-            logging.info(f"🚀 Telegram Web App uchun toza HTTPS havola o'rnatildi: {tunnel_url}")
-    except Exception as e:
-        logging.warning(f"Tunnel start ogohlantirish: {e}")
+    # Avtomatik Cloudflare Tunnel (faqat WEBAPP_URL o'rnatilmagan bo'lsa va lokal Windows bo'lsa)
+    if config.WEBAPP_URL:
+        logging.info(f"🚀 Telegram Web App uchun belgilangan HTTPS havola: {config.WEBAPP_URL}")
+    else:
+        try:
+            tunnel_url = tunnel.start_tunnel_sync(config.WEBAPP_PORT)
+            if tunnel_url:
+                config.WEBAPP_URL = tunnel_url
+                logging.info(f"🚀 Telegram Web App uchun toza HTTPS havola o'rnatildi: {tunnel_url}")
+        except Exception as e:
+            logging.warning(f"Tunnel start ogohlantirish: {e}")
 
     # Barcha mavjud userbot sessiyalarini qayta yuklash
     sessions = database.get_all_sessions()

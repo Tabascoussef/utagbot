@@ -20,5 +20,5 @@ HARD_TAG_LIMIT = 400
 
 
 WEBAPP_HOST = os.getenv("WEBAPP_HOST", "0.0.0.0")
-WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080"))
+WEBAPP_PORT = int(os.getenv("PORT", os.getenv("WEBAPP_PORT", "8080")))
 WEBAPP_URL = os.getenv("WEBAPP_URL", "")

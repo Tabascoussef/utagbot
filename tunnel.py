@@ -17,6 +17,11 @@ def start_tunnel_sync(port: int = 8080) -> Optional[str]:
     """
     global tunnel_process
 
+    # Linux yoki server muhitida (Render kabi) .exe ishlamaydi, shuning uchun o'tkazib yuboriladi
+    if sys.platform != "win32":
+        logging.info("Server/Linux muhiti aniqlandi. Cloudflare Tunnel (.exe) ishga tushirilmaydi.")
+        return None
+
     exe_path = os.path.join(os.path.dirname(__file__), "cloudflared.exe")
     if not os.path.exists(exe_path):
         logging.warning("cloudflared.exe topilmadi. Lokal URL ishlatiladi.")
