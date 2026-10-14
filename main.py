@@ -25,6 +25,7 @@ from aiogram.types import (
     BufferedInputFile,
     WebAppInfo
 )
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from pyrogram import Client, filters
@@ -2096,16 +2097,32 @@ async def admin_panel(message: Message):
         return
 
     stats = database.get_stats()
-    raw_url = config.WEBAPP_URL.rstrip("/") if config.WEBAPP_URL else f"http://localhost:{config.WEBAPP_PORT}"
-    base_admin = f"{raw_url}/admin" if not raw_url.endswith("/admin") else raw_url
-    webapp_url = f"{base_admin}?admin_id={message.from_user.id}"
+    current_url = (config.WEBAPP_URL or "").strip().rstrip("/")
+    is_localhost = not current_url or any(h in current_url.lower() for h in ["localhost", "127.0.0.1", "0.0.0.0"])
 
     buttons = []
-    if webapp_url.startswith("https://"):
+    hint_text = ""
+
+    if not is_localhost and current_url.startswith("https://"):
+        base_admin = f"{current_url}/admin" if not current_url.endswith("/admin") else current_url
+        webapp_url = f"{base_admin}?admin_id={message.from_user.id}"
         buttons.append([InlineKeyboardButton(text="🌐 Web App Admin Panel", web_app=WebAppInfo(url=webapp_url))])
-    elif webapp_url.startswith("http://"):
+    elif not is_localhost and current_url.startswith("http://"):
+        base_admin = f"{current_url}/admin" if not current_url.endswith("/admin") else current_url
+        webapp_url = f"{base_admin}?admin_id={message.from_user.id}"
         buttons.append([InlineKeyboardButton(text="🌐 Web App Admin Panel", url=webapp_url)])
-    
+    else:
+        # Telegram serveri localhost havolali tugmalarni qabul qilmaydi (Wrong HTTP URL xatosi beradi)
+        local_url = f"http://localhost:{config.WEBAPP_PORT}/admin?admin_id={message.from_user.id}"
+        hint_text = (
+            "\n\n⚠️ <b>Telegram Web App (HTTPS) sozlanmagan:</b>\n"
+            "Telegram inline tugmalari faqat rasmiy internet manzillari (HTTPS) bilan ishlaydi.\n\n"
+            f"💻 <b>Brauzer orqali kirish (Lokal):</b>\n<code>{local_url}</code>\n\n"
+            "💡 <b>Telegram tugmasini yoqish uchun:</b>\n"
+            "Render 'Environment' bo'limida <code>WEBAPP_URL</code> o'zgaruvchisiga HTTPS havolangizni kiriting "
+            "(masalan: <code>https://your-service.onrender.com</code>)."
+        )
+
     kb = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
 
     response_text = (
@@ -2115,8 +2132,14 @@ async def admin_panel(message: Message):
         f"• Faol obunalar: <code>{stats['active_subs']}</code> ta\n"
         f"• Obunasi tugaganlar: <code>{stats['expired_subs']}</code> ta\n"
         f"• Kutilayotgan so'rovlar: <code>{stats['pending_requests']}</code> ta"
+        f"{hint_text}"
     )
-    await message.answer(response_text, reply_markup=kb, parse_mode="HTML")
+
+    try:
+        await message.answer(response_text, reply_markup=kb, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        logging.error(f"Admin panel xabarini yuborishda xatolik: {e}")
+        await message.answer(response_text, parse_mode="HTML")
 
 
 @dp.message(F.text == "📚 Qo'llanma")
