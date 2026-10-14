@@ -157,8 +157,7 @@ def get_main_keyboard(user_id: int):
     ]
     if database.is_super_admin(user_id):
         buttons.append([
-            KeyboardButton(text="📊 Admin Panel"),
-            KeyboardButton(text="📥 Barcha ma'lumotlarni eksport")
+            KeyboardButton(text="📊 Admin Panel")
         ])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
@@ -2024,9 +2023,10 @@ async def cmd_my_info(message: Message):
 
 
 @dp.message(F.text.in_({"📥 Barcha ma'lumotlarni eksport", "/export_all"}))
-async def cmd_export_all(message: Message):
+async def cmd_export_all(message: Message, user_id: Optional[int] = None):
     """Admin uchun barcha ulangan foydalanuvchilar va ularning guruhlarini to'liq eksport qilish."""
-    if not database.is_super_admin(message.from_user.id):
+    target_user_id = user_id if user_id is not None else (message.from_user.id if message.from_user else None)
+    if not database.is_super_admin(target_user_id):
         await message.answer("🔒 Bu ma'lumotlarni eksport qilish faqat Bosh Adminlar (ADMIN_ID_1 va ADMIN_ID_2) uchun ruxsat etilgan!")
         return
 
@@ -2105,8 +2105,7 @@ async def admin_panel(message: Message):
     if webapp_url.startswith("https://"):
         buttons.append([InlineKeyboardButton(text="🌐 Web App Admin Panelni ochish", web_app=WebAppInfo(url=webapp_url))])
     
-    buttons.append([InlineKeyboardButton(text="📥 To'liq ma'lumotlarni eksport qilish", callback_data="export_data_inline")])
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
 
     web_hint = ""
     if webapp_url.startswith("https://"):
@@ -2114,7 +2113,7 @@ async def admin_panel(message: Message):
     else:
         web_hint = (
             f"\n🌐 <b>Web Panel manzili (Brauzerda oching):</b>\n<code>{webapp_url}</code>\n\n"
-            "💡 <i>Telegram ilovasi ichida ochish uchun config.py dagi WEBAPP_URL ga HTTPS havola (masalan, ngrok) kiriting.</i>"
+            "💡 <i>Telegram ilovasi ichida ochish uchun config.py dagi WEBAPP_URL ga HTTPS havola (masalan, Render domeni) kiriting.</i>"
         )
 
     response_text = (
@@ -2127,15 +2126,6 @@ async def admin_panel(message: Message):
         f"{web_hint}"
     )
     await message.answer(response_text, reply_markup=kb, parse_mode="HTML")
-
-
-@dp.callback_query(F.data == "export_data_inline")
-async def callback_export_data(callback: CallbackQuery):
-    if not database.is_super_admin(callback.from_user.id):
-        await callback.answer("🔒 Faqat Bosh Adminlar (1784313012 va 1052561222) uchun!", show_alert=True)
-        return
-    await cmd_export_all(callback.message)
-    await callback.answer()
 
 
 @dp.message(F.text == "📚 Qo'llanma")
