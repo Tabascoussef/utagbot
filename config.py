@@ -2,7 +2,7 @@ import os
 
 API_ID = int(os.getenv("API_ID", "33465516"))
 API_HASH = os.getenv("API_HASH", "8c3c061c71bdbb70da28dc677b13e678")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8901205517:AAEekz987OnSFLiHOIeBJSEkXoEO1pvX_Qo")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8901205517:AAGwTuw5v3ETpMwx8a13cFDNHNe8EltnQw8")
 
 ADMIN_ID_1 = int(os.getenv("ADMIN_ID_1", "1784313012"))
 ADMIN_ID_2 = int(os.getenv("ADMIN_ID_2", "1052561222"))
