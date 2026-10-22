@@ -2075,23 +2075,51 @@ ACCESS_DENIED_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
+PUBLIC_SERVICE_HTML = """<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UTAG Bot Service</title>
+</head>
+<body style="background:#0f172a;color:#f8fafc;font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:16px;box-sizing:border-box;">
+  <div style="text-align:center;padding:32px 24px;background:#1e293b;border-radius:20px;border:1px solid rgba(255,255,255,0.1);max-width:380px;width:100%;box-shadow:0 20px 40px rgba(0,0,0,0.5);">
+    <div style="display:inline-flex;align-items:center;gap:6px;background:rgba(16,185,129,0.15);color:#10b981;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600;margin-bottom:16px;">
+      <span style="width:8px;height:8px;background:#10b981;border-radius:50%;display:inline-block;"></span> Active
+    </div>
+    <h2 style="margin:0 0 10px 0;color:#f8fafc;font-size:20px;font-weight:800;">🤖 UTAG Bot Web Service</h2>
+    <p style="color:#94a3b8;font-size:13px;line-height:1.6;margin:0;">Xizmat faol ishlamoqda.<br>Web App admin paneliga faqat Telegram bot orqali kirish mumkin.</p>
+  </div>
+</body>
+</html>"""
+
 
 @web.middleware
 async def superadmin_auth_middleware(request: web.Request, handler):
     """
-    Middleware: Web App va uning barcha API lariga FAQAT VA FAQAT
-    ADMIN_ID_1 (1784313012) va ADMIN_ID_2 (1052561222) kirishini ta'minlaydi.
-    Boshqa har qanday foydalanuvchiga kirish butunlay taqiqlanadi (403 Forbidden).
+    Middleware: Web App va uning barcha API larini himoyalaydi.
+    - Health check (/health, /ping, /favicon.ico) uchun 200 OK qaytaradi.
+    - Render va brauzer tekshiruvlari (/, /admin) uchun 200 OK xizmat sahifasini ko'rsatadi.
+    - API chaqiruvlari (/api/*) uchun FAQAT Super Adminlarga (ADMIN_IDS) ruxsat beradi.
     """
+    if request.path in ["/health", "/ping", "/favicon.ico"]:
+        return await handler(request)
+
     caller_id = get_request_admin_id(request)
+
+    if request.path in ["/", "/admin"]:
+        if not database.is_super_admin(caller_id):
+            return web.Response(text=PUBLIC_SERVICE_HTML, content_type="text/html", status=200)
+        return await handler(request)
+
+    # API so'rovlari uchun qat'iy tekshiruv
     if not database.is_super_admin(caller_id):
-        logging.warning(f"🔒 Ruxsatsiz Web App murojaati to'xtatildi (ID: {caller_id}, Path: {request.path})")
-        if request.path in ["/", "/admin"]:
-            return web.Response(text=ACCESS_DENIED_HTML, content_type="text/html", status=403)
+        logging.warning(f"🔒 Ruxsatsiz Web App API murojaati to'xtatildi (ID: {caller_id}, Path: {request.path})")
         return web.json_response({
             "ok": False,
-            "error": "🔒 Ruxsat etilmadi: Ushbu tizim faqat Bosh Adminlar (1784313012 va 1052561222) uchun ruxsat etilgan!"
+            "error": "🔒 Ruxsat etilmadi: Ushbu tizim faqat Bosh Adminlar uchun ruxsat etilgan!"
         }, status=403)
+
     return await handler(request)
 
 
@@ -2099,7 +2127,7 @@ async def handle_index(request: web.Request):
     """Mini App bosh sahifasi (HTML). Faqat Bosh Adminlar uchun ochiladi."""
     caller_id = get_request_admin_id(request)
     if not database.is_super_admin(caller_id):
-        return web.Response(text=ACCESS_DENIED_HTML, content_type="text/html", status=403)
+        return web.Response(text=PUBLIC_SERVICE_HTML, content_type="text/html", status=200)
     is_super = database.is_super_admin(caller_id)
     injected_js = f"window.__INITIAL_ADMIN__ = {{ adminId: {caller_id}, isSuperAdmin: {'true' if is_super else 'false'} }};"
     rendered_html = HTML_PAGE.replace("window.__INITIAL_ADMIN__ = {};", injected_js)
@@ -2367,9 +2395,16 @@ async def handle_get_user_groups(request: web.Request):
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
+async def handle_health(request: web.Request):
+    """Render va Uptime monitorlar uchun health check javobi."""
+    return web.json_response({"status": "ok", "service": "utagbot"})
+
+
 def create_webapp_app() -> web.Application:
     """aiohttp web application yaratadi va middlewarelarni ulaydi."""
     app = web.Application(middlewares=[superadmin_auth_middleware])
+    app.router.add_get("/health", handle_health)
+    app.router.add_get("/ping", handle_health)
     app.router.add_get("/", handle_index)
     app.router.add_get("/admin", handle_index)
     app.router.add_get("/api/stats", handle_get_stats)
