@@ -1,16 +1,155 @@
+import os
 import sqlite3
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 import config
 
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    psycopg2 = None
+    RealDictCursor = None
+
 DB_NAME = "userbots.db"
+IS_POSTGRES = bool(config.DATABASE_URL and psycopg2 is not None)
+
+
+class PGCursorWrapper:
+    """PostgreSQL kursorini SQLite sintaksisiga (va parametrlariga) moslashtiruvchi wrapper."""
+    def __init__(self, cur):
+        self._cur = cur
+        self._lastrowid = None
+
+    def execute(self, sql: str, params: Any = None):
+        sql = sql.replace("?", "%s")
+        if "INSERT OR IGNORE INTO admins" in sql:
+            sql = sql.replace("INSERT OR IGNORE INTO admins", "INSERT INTO admins")
+            if "ON CONFLICT" not in sql:
+                sql += " ON CONFLICT (user_id) DO NOTHING"
+
+        # Avtomatik lastrowid olish uchun RETURNING id qo'shish
+        is_payment_insert = "INSERT INTO payment_requests" in sql and "RETURNING" not in sql
+        if is_payment_insert:
+            sql += " RETURNING id"
+
+        if params is not None:
+            self._cur.execute(sql, params)
+        else:
+            self._cur.execute(sql)
+
+        if is_payment_insert:
+            try:
+                row = self._cur.fetchone()
+                if row and "id" in row:
+                    self._lastrowid = row["id"]
+            except Exception:
+                pass
+        return self
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    @property
+    def lastrowid(self):
+        return self._lastrowid
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+
+class PGConnectionWrapper:
+    """PostgreSQL ulanishini SQLite interfeysiga moslashtiruvchi wrapper."""
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return PGCursorWrapper(self._conn.cursor())
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+    def close(self):
+        return self._conn.close()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
 
 def get_connection():
-    """SQLite ulanishini qaytaradi."""
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Ma'lumotlar bazasi ulanishini qaytaradi (PostgreSQL yoki SQLite)."""
+    if IS_POSTGRES:
+        conn = psycopg2.connect(config.DATABASE_URL, cursor_factory=RealDictCursor)
+        return PGConnectionWrapper(conn)
+    else:
+        conn = sqlite3.connect(DB_NAME)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+
+def _migrate_from_sqlite(pg_conn):
+    """Lokal SQLite faylidan foydalanuvchilar va sessiyalarni PostgreSQL ga ko'chiradi."""
+    try:
+        if not os.path.exists(DB_NAME):
+            return
+        s_conn = sqlite3.connect(DB_NAME)
+        s_conn.row_factory = sqlite3.Row
+        s_cur = s_conn.cursor()
+
+        # Users
+        s_cur.execute("SELECT * FROM users")
+        s_users = s_cur.fetchall()
+        pg_cur = pg_conn.cursor()
+        for u in s_users:
+            ud = dict(u)
+            pg_cur.execute("""
+                INSERT INTO users (user_id, phone, session_string, speed, subscription_end, payment_status, created_at, username, first_name)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id) DO NOTHING
+            """, (
+                ud.get("user_id"),
+                ud.get("phone", ""),
+                ud.get("session_string", ""),
+                ud.get("speed", 2.0),
+                ud.get("subscription_end"),
+                ud.get("payment_status", "none"),
+                ud.get("created_at"),
+                ud.get("username"),
+                ud.get("first_name")
+            ))
+
+        # Admins
+        s_cur.execute("SELECT * FROM admins")
+        for a in s_cur.fetchall():
+            ad = dict(a)
+            pg_cur.execute("""
+                INSERT INTO admins (user_id, added_by, created_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id) DO NOTHING
+            """, (ad.get("user_id"), ad.get("added_by", 0), ad.get("created_at")))
+
+        # Payment requests
+        s_cur.execute("SELECT * FROM payment_requests")
+        for p in s_cur.fetchall():
+            pd = dict(p)
+            pg_cur.execute("""
+                INSERT INTO payment_requests (user_id, plan, stars, status, proof_file_id, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (pd.get("user_id"), pd.get("plan"), pd.get("stars"), pd.get("status"), pd.get("proof_file_id"), pd.get("created_at")))
+
+        pg_conn.commit()
+        s_conn.close()
+        logging.info(f"✅ SQLite ({DB_NAME}) dagi {len(s_users)} ta foydalanuvchi PostgreSQL ga muvaffaqiyatli ko'chirildi!")
+    except Exception as e:
+        logging.warning(f"SQLite dan migratsiya ogohlantirish: {e}")
+
 
 def init_db():
     """
@@ -22,16 +161,63 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # 1. users jadvalini yaratish
+    if IS_POSTGRES:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                phone TEXT NOT NULL DEFAULT '',
+                session_string TEXT NOT NULL DEFAULT '',
+                speed REAL DEFAULT 2.0,
+                subscription_end TEXT,
+                payment_status TEXT DEFAULT 'none',
+                created_at TEXT,
+                username TEXT,
+                first_name TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS payment_requests (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                plan TEXT NOT NULL,
+                stars INTEGER NOT NULL,
+                status TEXT DEFAULT 'pending',
+                proof_file_id TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id BIGINT PRIMARY KEY,
+                added_by BIGINT DEFAULT 0,
+                created_at TEXT
+            )
+        """)
+        conn.commit()
+        # Bo'sh bo'lsa SQLite dan avtomatik ko'chirish
+        try:
+            cursor.execute("SELECT COUNT(*) AS cnt FROM users")
+            row = cursor.fetchone()
+            if row and row["cnt"] == 0:
+                _migrate_from_sqlite(conn)
+        except Exception as e:
+            logging.warning(f"Migratsiya tekshiruvida ogohlantirish: {e}")
+        conn.close()
+        logging.info("🐘 PostgreSQL ma'lumotlar bazasi muvaffaqiyatli tekshirildi va ishga tushirildi.")
+        return
+
+    # SQLite sxemasi
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
-            phone TEXT NOT NULL,
-            session_string TEXT NOT NULL,
+            phone TEXT NOT NULL DEFAULT '',
+            session_string TEXT NOT NULL DEFAULT '',
             speed REAL DEFAULT 2.0,
             subscription_end TEXT,
             payment_status TEXT DEFAULT 'none',
-            created_at TEXT
+            created_at TEXT,
+            username TEXT,
+            first_name TEXT
         )
     """)
 

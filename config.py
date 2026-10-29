@@ -1,6 +1,9 @@
 import os
 
 API_ID = int(os.getenv("API_ID", "33465516"))
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 API_HASH = os.getenv("API_HASH", "8c3c061c71bdbb70da28dc677b13e678")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8901205517:AAGwTuw5v3ETpMwx8a13cFDNHNe8EltnQw8")
 
