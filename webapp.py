@@ -1,7 +1,8 @@
 import json
+import time
 import logging
 import asyncio
-from aiohttp import web
+from aiohttp import web, ClientSession, ClientTimeout
 from typing import Dict, Any, Optional
 import config
 import database
@@ -241,6 +242,87 @@ HTML_PAGE = """<!DOCTYPE html>
             display: inline-flex;
             align-items: center;
             gap: 5px;
+        }
+
+        .hero-stars-section {
+            position: relative;
+            z-index: 1;
+            background: rgba(10, 16, 45, 0.32);
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            border-radius: 16px;
+            padding: 12px 14px;
+            margin-bottom: 14px;
+            backdrop-filter: blur(10px);
+        }
+
+        .hero-stars-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .hero-stars-label {
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            color: rgba(255, 255, 255, 0.8);
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .hero-stars-main {
+            font-size: 24px;
+            font-weight: 800;
+            color: #fde047;
+            letter-spacing: -0.5px;
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            text-shadow: 0 2px 12px rgba(250, 204, 21, 0.45);
+        }
+
+        .hero-rates-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+        }
+
+        .hero-rate-pill {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            border-radius: 12px;
+            padding: 8px 6px;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .hero-rate-curr {
+            font-size: 10px;
+            font-weight: 700;
+            color: rgba(255, 255, 255, 0.75);
+            letter-spacing: 0.3px;
+        }
+
+        .hero-rate-val {
+            font-size: 13px;
+            font-weight: 800;
+            color: #ffffff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .hero-rate-sub {
+            font-size: 9.5px;
+            font-weight: 600;
+            color: #bae6fd;
+            opacity: 0.9;
+            white-space: nowrap;
         }
 
         .card-dots {
@@ -1060,9 +1142,9 @@ HTML_PAGE = """<!DOCTYPE html>
     <!-- 1. DASHBOARD TAB (SCREEN 1 & 2 STYLE) -->
     <div id="tab-dashboard" class="tab-pane active">
 
-        <!-- HERO CREDIT-CARD STYLE -->
+        <!-- HERO CREDIT-CARD STYLE (STARS BALANCE + TON / USD / UZS RATIOS) -->
         <div class="hero-card">
-            <div class="hero-card-top">
+            <div class="hero-card-top" style="margin-bottom: 14px;">
                 <div class="card-circles">
                     <div class="circle-yellow"></div>
                     <div class="circle-cyan"></div>
@@ -1072,9 +1154,39 @@ HTML_PAGE = """<!DOCTYPE html>
                     <div class="hero-user-number">1784 •••• •••• 3012</div>
                 </div>
             </div>
+
+            <!-- BOT HISOBIDAGI STARSLAR VA VALYUTA NISBATI -->
+            <div class="hero-stars-section">
+                <div class="hero-stars-top">
+                    <div class="hero-stars-label">⭐️ Bot Stars Hisobi</div>
+                    <div class="hero-stars-main">
+                        <span>⭐️</span>
+                        <span id="heroStarsCount">0</span>
+                        <span style="font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.85);">Stars</span>
+                    </div>
+                </div>
+                <div class="hero-rates-grid">
+                    <div class="hero-rate-pill">
+                        <span class="hero-rate-curr">💎 TON</span>
+                        <span class="hero-rate-val" id="heroTonVal">0.000 TON</span>
+                        <span class="hero-rate-sub" id="heroTonRatio">100 ⭐️ ≈ 0.25 TON</span>
+                    </div>
+                    <div class="hero-rate-pill">
+                        <span class="hero-rate-curr">💵 USD</span>
+                        <span class="hero-rate-val" id="heroUsdVal">$0.00</span>
+                        <span class="hero-rate-sub" id="heroUsdRatio">100 ⭐️ = $1.30</span>
+                    </div>
+                    <div class="hero-rate-pill">
+                        <span class="hero-rate-curr">🇺🇿 UZS</span>
+                        <span class="hero-rate-val" id="heroUzsVal">0 so'm</span>
+                        <span class="hero-rate-sub" id="heroUzsRatio">100 ⭐️ ≈ 16.7k</span>
+                    </div>
+                </div>
+            </div>
+
             <div class="hero-card-bottom">
                 <span class="badge-superadmin">👑 Super Admin</span>
-                <span style="font-size: 11px; opacity: 0.85; font-weight: 600;">⚡️ Cheksiz Obuna</span>
+                <span style="font-size: 11px; opacity: 0.9; font-weight: 600;" id="heroLiveRateInfo">⚡️ Cheksiz Obuna</span>
             </div>
         </div>
         <div class="card-dots">
@@ -1087,7 +1199,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
         <!-- 3-COLUMN METRICS GRID (MATCHING SCREEN 1) -->
         <div class="metrics-grid">
-            <div class="metric-card">
+            <div class="metric-card" style="cursor: pointer;" onclick="switchNavTab('tab-users'); switchUsersSubTab('unsubscribed');">
                 <div class="metric-icon-box">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                         <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
@@ -1098,7 +1210,7 @@ HTML_PAGE = """<!DOCTYPE html>
                 <div class="metric-val" id="stat-total">0</div>
             </div>
 
-            <div class="metric-card">
+            <div class="metric-card" style="cursor: pointer;" onclick="switchNavTab('tab-users'); switchUsersSubTab('subscribed');">
                 <div class="metric-icon-box">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round">
                         <rect x="2" y="5" width="20" height="14" rx="2"></rect>
@@ -1130,54 +1242,50 @@ HTML_PAGE = """<!DOCTYPE html>
             <div class="empty-state" style="padding: 10px;">Yuklanmoqda...</div>
         </div>
 
-        <!-- NEON CURVED GRAPH (MATCHING SCREEN 1 & 2) -->
+        <!-- OBUNALAR GRAFIGI (SUBSCRIPTIONS CHART) -->
         <div class="chart-card">
             <div class="chart-header">
-                <span class="chart-title">Tizim faolligi ko'rsatkichi</span>
-                <span class="chart-tag">2026 Live</span>
+                <span class="chart-title">📊 Obunalar grafigi (7 kunlik)</span>
+                <span class="chart-tag" id="chartPercentTag">Faol: 0%</span>
             </div>
 
-            <div class="chart-tooltip-badge">⚡️ Cloudflare Online</div>
+            <div class="chart-tooltip-badge" id="chartTooltipBadge">💎 Obuna: 0 ta | 👤 Obunasiz: 0 ta</div>
 
-            <svg class="neon-chart-svg" viewBox="0 0 320 120">
+            <svg class="neon-chart-svg" id="subsChartSvg" viewBox="0 0 320 135" style="height: 140px;">
                 <defs>
                     <linearGradient id="cyanGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.35"/>
+                        <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.38"/>
                         <stop offset="100%" stop-color="#00f2fe" stop-opacity="0.0"/>
                     </linearGradient>
                     <linearGradient id="coralGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stop-color="#ff5277" stop-opacity="0.25"/>
+                        <stop offset="0%" stop-color="#ff5277" stop-opacity="0.28"/>
                         <stop offset="100%" stop-color="#ff5277" stop-opacity="0.0"/>
                     </linearGradient>
                 </defs>
-                <!-- Cyan Wave -->
-                <path d="M 0,70 Q 50,20 100,55 T 200,30 T 320,65 L 320,120 L 0,120 Z" fill="url(#cyanGrad)" />
-                <path d="M 0,70 Q 50,20 100,55 T 200,30 T 320,65" fill="none" stroke="#00f2fe" stroke-width="2.5" stroke-linecap="round" />
-                
-                <!-- Coral Wave -->
-                <path d="M 0,90 Q 60,60 120,80 T 220,50 T 320,85 L 320,120 L 0,120 Z" fill="url(#coralGrad)" />
-                <path d="M 0,90 Q 60,60 120,80 T 220,50 T 320,85" fill="none" stroke="#ff5277" stroke-width="2.5" stroke-linecap="round" />
-                
-                <!-- Glowing node circles -->
-                <circle cx="160" cy="42" r="5" fill="#00f2fe" stroke="#121522" stroke-width="2" />
-                <circle cx="260" cy="58" r="5" fill="#ff5277" stroke="#121522" stroke-width="2" />
+                <!-- Dinamik ravishda JS orqali chiziladi -->
+                <path id="chartSubArea" d="M 0,90 Q 50,60 100,75 T 200,50 T 320,65 L 320,115 L 0,115 Z" fill="url(#cyanGrad)" />
+                <path id="chartSubLine" d="M 0,90 Q 50,60 100,75 T 200,50 T 320,65" fill="none" stroke="#00f2fe" stroke-width="2.5" stroke-linecap="round" />
+                <path id="chartUnsubArea" d="M 0,100 Q 60,80 120,90 T 220,70 T 320,85 L 320,115 L 0,115 Z" fill="url(#coralGrad)" />
+                <path id="chartUnsubLine" d="M 0,100 Q 60,80 120,90 T 220,70 T 320,85" fill="none" stroke="#ff5277" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="4 3" />
+                <g id="chartPointsGroup"></g>
+                <g id="chartLabelsGroup"></g>
             </svg>
 
             <div class="chart-legend">
-                <div class="legend-item">
+                <div class="legend-item" style="cursor: pointer;" onclick="switchNavTab('tab-users'); switchUsersSubTab('subscribed');">
                     <div class="legend-dot-cyan"></div>
-                    <span>Userbotlar: Faol</span>
+                    <span>Obuna olganlar: <b id="legendSubCount" style="color:#00f2fe;">0</b></span>
                 </div>
-                <div class="legend-item">
+                <div class="legend-item" style="cursor: pointer;" onclick="switchNavTab('tab-users'); switchUsersSubTab('unsubscribed');">
                     <div class="legend-dot-pink"></div>
-                    <span>Tunnel: HTTPS 8080</span>
+                    <span>Olmaganlar: <b id="legendUnsubCount" style="color:#ff5277;">0</b></span>
                 </div>
             </div>
         </div>
 
     </div>
 
-    <!-- 2. USERS LIST TAB -->
+    <!-- 2. USERS LIST TAB (2 TA TABGA AJRATILGAN: OBUNA OLGAN VA OLMAGANLAR) -->
     <div id="tab-users" class="tab-pane">
         <div class="search-pill">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
@@ -1185,6 +1293,18 @@ HTML_PAGE = """<!DOCTYPE html>
                 <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
             </svg>
             <input type="text" id="searchInput" placeholder="ID, username yoki telefon orqali qidirish..." oninput="filterUsers()">
+        </div>
+
+        <!-- OBUNA OLGANLAR VA OLMAGANLAR TABLARI -->
+        <div class="groups-tab-nav" id="usersSubTabsBar">
+            <button class="groups-tab-btn active" id="utab-btn-subscribed" onclick="switchUsersSubTab('subscribed')">
+                <span>💎 Obuna olganlar</span>
+                <span class="groups-tab-badge" id="utab-count-subscribed">0</span>
+            </button>
+            <button class="groups-tab-btn" id="utab-btn-unsubscribed" onclick="switchUsersSubTab('unsubscribed')">
+                <span>👤 Obuna olmaganlar</span>
+                <span class="groups-tab-badge" id="utab-count-unsubscribed">0</span>
+            </button>
         </div>
 
         <div class="users-list-container" id="usersList">
@@ -1504,6 +1624,156 @@ HTML_PAGE = """<!DOCTYPE html>
                 .replace(/'/g, '&#039;');
         }
 
+        let currentUsersSubTab = 'subscribed';
+
+        function formatUzs(num) {
+            return Math.round(num).toLocaleString('uz-UZ').replace(/,/g, ' ');
+        }
+
+        function updateHeroStarsAndRates(stats) {
+            const stars = Number(stats.bot_stars || stats.db_stars || 0);
+            const rates = stats.rates || { star_usd: 0.013, ton_usd: 5.2, usd_uzs: 12850 };
+            const starUsd = Number(rates.star_usd || 0.013);
+            const tonUsd = Number(rates.ton_usd || 5.2);
+            const usdUzs = Number(rates.usd_uzs || 12850);
+
+            const totalUsd = stars * starUsd;
+            const totalTon = tonUsd > 0 ? (totalUsd / tonUsd) : 0;
+            const totalUzs = totalUsd * usdUzs;
+
+            // 100 Stars nisbati
+            const ratio100Usd = 100 * starUsd;
+            const ratio100Ton = tonUsd > 0 ? (ratio100Usd / tonUsd) : 0;
+            const ratio100Uzs = ratio100Usd * usdUzs;
+
+            const starsEl = document.getElementById('heroStarsCount');
+            if (starsEl) starsEl.innerText = stars.toLocaleString('en-US');
+
+            const tonValEl = document.getElementById('heroTonVal');
+            if (tonValEl) tonValEl.innerText = `${totalTon.toFixed(3)} TON`;
+
+            const usdValEl = document.getElementById('heroUsdVal');
+            if (usdValEl) usdValEl.innerText = `$${totalUsd.toFixed(2)}`;
+
+            const uzsValEl = document.getElementById('heroUzsVal');
+            if (uzsValEl) uzsValEl.innerText = `${formatUzs(totalUzs)} so'm`;
+
+            const tonRatioEl = document.getElementById('heroTonRatio');
+            if (tonRatioEl) tonRatioEl.innerText = `100 ⭐️ ≈ ${ratio100Ton.toFixed(2)} TON`;
+
+            const usdRatioEl = document.getElementById('heroUsdRatio');
+            if (usdRatioEl) usdRatioEl.innerText = `100 ⭐️ = $${ratio100Usd.toFixed(2)}`;
+
+            const uzsRatioEl = document.getElementById('heroUzsRatio');
+            if (uzsRatioEl) uzsRatioEl.innerText = `100 ⭐️ ≈ ${formatUzs(ratio100Uzs)} so'm`;
+
+            const liveRateEl = document.getElementById('heroLiveRateInfo');
+            if (liveRateEl) {
+                liveRateEl.innerText = `1 TON ≈ $${tonUsd.toFixed(2)} | $1 ≈ ${formatUzs(usdUzs)} so'm`;
+            }
+        }
+
+        function buildSmoothPath(points) {
+            if (!points || points.length === 0) return "";
+            if (points.length === 1) return `M ${points[0].x},${points[0].y}`;
+            let d = `M ${points[0].x},${points[0].y}`;
+            for (let i = 0; i < points.length - 1; i++) {
+                const p0 = points[i];
+                const p1 = points[i + 1];
+                const midX = (p0.x + p1.x) / 2;
+                d += ` C ${midX},${p0.y} ${midX},${p1.y} ${p1.x},${p1.y}`;
+            }
+            return d;
+        }
+
+        function renderSubscriptionsChart(stats) {
+            const total = Number(stats.total_users || 0);
+            const active = Number(stats.active_subs || 0);
+            const unsub = Number(stats.expired_subs || Math.max(0, total - active));
+            const pct = total > 0 ? Math.round((active / total) * 100) : 0;
+
+            const pctEl = document.getElementById('chartPercentTag');
+            if (pctEl) pctEl.innerText = `Faol: ${pct}%`;
+
+            const badgeEl = document.getElementById('chartTooltipBadge');
+            if (badgeEl) badgeEl.innerText = `💎 Obuna: ${active} ta | 👤 Obunasiz: ${unsub} ta`;
+
+            const legSubEl = document.getElementById('legendSubCount');
+            if (legSubEl) legSubEl.innerText = `${active} ta`;
+
+            const legUnsubEl = document.getElementById('legendUnsubCount');
+            if (legUnsubEl) legUnsubEl.innerText = `${unsub} ta`;
+
+            const chartData = stats.chart || {};
+            const labels = chartData.labels || ["Du", "Se", "Ch", "Pa", "Ju", "Sh", "Ya"];
+            const subSeries = chartData.subscribed || [0, 0, 0, 0, 0, 0, active];
+            const unsubSeries = chartData.unsubscribed || [0, 0, 0, 0, 0, 0, unsub];
+
+            const maxVal = Math.max(5, ...subSeries, ...unsubSeries);
+            const topY = 26;
+            const bottomY = 104;
+            const heightSpan = bottomY - topY;
+            const leftX = 18;
+            const rightX = 302;
+            const count = Math.max(2, labels.length);
+            const stepX = (rightX - leftX) / (count - 1);
+
+            const subPts = subSeries.map((val, idx) => ({
+                x: Math.round(leftX + idx * stepX),
+                y: Math.round(bottomY - (val / maxVal) * heightSpan),
+                val: val
+            }));
+
+            const unsubPts = unsubSeries.map((val, idx) => ({
+                x: Math.round(leftX + idx * stepX),
+                y: Math.round(bottomY - (val / maxVal) * heightSpan),
+                val: val
+            }));
+
+            const subLineD = buildSmoothPath(subPts);
+            const subAreaD = `${subLineD} L ${subPts[subPts.length - 1].x},${bottomY + 8} L ${subPts[0].x},${bottomY + 8} Z`;
+
+            const unsubLineD = buildSmoothPath(unsubPts);
+            const unsubAreaD = `${unsubLineD} L ${unsubPts[unsubPts.length - 1].x},${bottomY + 8} L ${unsubPts[0].x},${bottomY + 8} Z`;
+
+            document.getElementById('chartSubLine')?.setAttribute('d', subLineD);
+            document.getElementById('chartSubArea')?.setAttribute('d', subAreaD);
+            document.getElementById('chartUnsubLine')?.setAttribute('d', unsubLineD);
+            document.getElementById('chartUnsubArea')?.setAttribute('d', unsubAreaD);
+
+            const ptsGroup = document.getElementById('chartPointsGroup');
+            if (ptsGroup) {
+                let ptsHtml = '';
+                subPts.forEach((p, idx) => {
+                    ptsHtml += `<circle cx="${p.x}" cy="${p.y}" r="3.8" fill="#00f2fe" stroke="#121522" stroke-width="1.8" />`;
+                    if (idx === subPts.length - 1 || p.val > 0) {
+                        ptsHtml += `<text x="${p.x}" y="${p.y - 7}" fill="#00f2fe" font-size="9" font-weight="700" text-anchor="middle">${p.val}</text>`;
+                    }
+                });
+                unsubPts.forEach((p, idx) => {
+                    ptsHtml += `<circle cx="${p.x}" cy="${p.y}" r="3.2" fill="#ff5277" stroke="#121522" stroke-width="1.5" />`;
+                });
+                ptsGroup.innerHTML = ptsHtml;
+            }
+
+            const lblGroup = document.getElementById('chartLabelsGroup');
+            if (lblGroup) {
+                lblGroup.innerHTML = labels.map((lbl, idx) => {
+                    const x = Math.round(leftX + idx * stepX);
+                    const shortLbl = String(lbl).split(' ')[0];
+                    return `<text x="${x}" y="128" fill="#8e95af" font-size="9.5" font-weight="600" text-anchor="middle">${escapeHtml(shortLbl)}</text>`;
+                }).join('');
+            }
+        }
+
+        function switchUsersSubTab(subTab) {
+            currentUsersSubTab = subTab;
+            document.querySelectorAll('#usersSubTabsBar .groups-tab-btn').forEach(btn => btn.classList.remove('active'));
+            const activeBtn = document.getElementById('utab-btn-' + subTab);
+            if (activeBtn) activeBtn.classList.add('active');
+            filterUsers();
+        }
+
         async function loadData() {
             try {
                 const statsRes = await fetch('/api/stats', {
@@ -1515,11 +1785,14 @@ HTML_PAGE = """<!DOCTYPE html>
                 const activeEl = document.getElementById('stat-active');
                 if (activeEl) activeEl.innerText = stats.active_subs || 0;
 
+                updateHeroStarsAndRates(stats);
+                renderSubscriptionsChart(stats);
+
                 const usersRes = await fetch('/api/users', {
                     headers: { 'X-Admin-Id': String(currentAdminId) }
                 });
                 allUsers = await usersRes.json();
-                renderUsers(allUsers);
+                filterUsers();
                 renderContactsCarousel(allUsers);
                 if (isCurrentUserSuperAdmin) {
                     renderActiveChips(allUsers);
@@ -1647,15 +1920,29 @@ HTML_PAGE = """<!DOCTYPE html>
         }
 
         function filterUsers() {
-            const query = document.getElementById('searchInput').value.toLowerCase().trim();
-            const filtered = allUsers.filter(u => {
+            const searchEl = document.getElementById('searchInput');
+            const query = searchEl ? searchEl.value.toLowerCase().trim() : '';
+
+            const matched = (allUsers || []).filter(u => {
+                if (!query) return true;
                 const idStr = String(u.user_id);
                 const phoneStr = (u.phone || '').toLowerCase();
                 const unameStr = (u.username || '').toLowerCase();
                 const fnameStr = (u.first_name || '').toLowerCase();
                 return idStr.includes(query) || phoneStr.includes(query) || unameStr.includes(query) || fnameStr.includes(query);
             });
-            renderUsers(filtered);
+
+            const subList = matched.filter(u => Boolean(u.is_active));
+            const unsubList = matched.filter(u => !u.is_active);
+
+            const subBadge = document.getElementById('utab-count-subscribed');
+            if (subBadge) subBadge.innerText = subList.length;
+
+            const unsubBadge = document.getElementById('utab-count-unsubscribed');
+            if (unsubBadge) unsubBadge.innerText = unsubList.length;
+
+            const targetList = currentUsersSubTab === 'unsubscribed' ? unsubList : subList;
+            renderUsers(targetList);
         }
 
         async function addDays(userId, days) {
@@ -2134,9 +2421,81 @@ async def handle_index(request: web.Request):
     return web.Response(text=rendered_html, content_type="text/html")
 
 
+_stars_cache = {"ts": 0.0, "amount": 0}
+_rates_cache = {"ts": 0.0, "star_usd": 0.013, "ton_usd": 5.20, "usd_uzs": 12850.0}
+
+
+async def get_live_stars_and_rates(db_stars: int = 0) -> Dict[str, Any]:
+    """
+    Telegram Bot API orqali botning joriy Stars balansini hamda
+    TON, USD va UZS kurslarini kesh bilan (tez va xavfsiz) oladi.
+    """
+    now_ts = time.time()
+    api_stars = _stars_cache["amount"]
+
+    # 1. Bot Stars balansini olish (har 20 soniyada yangilanadi)
+    if now_ts - _stars_cache["ts"] > 20:
+        try:
+            timeout = ClientTimeout(total=3.0)
+            async with ClientSession(timeout=timeout) as session:
+                url_bal = f"https://api.telegram.org/bot{config.BOT_TOKEN}/getMyStarBalance"
+                async with session.get(url_bal) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("ok") and isinstance(data.get("result"), dict):
+                            api_stars = int(data["result"].get("amount", 0))
+                            _stars_cache["amount"] = api_stars
+                            _stars_cache["ts"] = now_ts
+                    else:
+                        # Fallback: getStarTransactions orqali hisoblash
+                        url_tx = f"https://api.telegram.org/bot{config.BOT_TOKEN}/getStarTransactions"
+                        async with session.get(url_tx) as tx_resp:
+                            if tx_resp.status == 200:
+                                tx_data = await tx_resp.json()
+                                txs = tx_data.get("result", {}).get("transactions", [])
+                                net_stars = sum(int(t.get("amount", 0)) for t in txs)
+                                api_stars = max(0, net_stars)
+                                _stars_cache["amount"] = api_stars
+                                _stars_cache["ts"] = now_ts
+        except Exception as e:
+            logging.debug(f"Telegram Stars balance check fallback: {e}")
+
+    # 2. TON/USD va USD/UZS kurslarini olish (har 5 daqiqada yangilanadi)
+    if now_ts - _rates_cache["ts"] > 300:
+        try:
+            timeout = ClientTimeout(total=2.5)
+            async with ClientSession(timeout=timeout) as session:
+                async with session.get("https://tonapi.io/v2/rates?tokens=ton&currencies=usd,uzs") as r_ton:
+                    if r_ton.status == 200:
+                        r_data = await r_ton.json()
+                        prices = r_data.get("rates", {}).get("TON", {}).get("prices", {})
+                        ton_usd = float(prices.get("USD", 0) or 0)
+                        ton_uzs = float(prices.get("UZS", 0) or 0)
+                        if ton_usd > 0:
+                            _rates_cache["ton_usd"] = round(ton_usd, 3)
+                        if ton_usd > 0 and ton_uzs > 0:
+                            _rates_cache["usd_uzs"] = round(ton_uzs / ton_usd, 2)
+                        _rates_cache["ts"] = now_ts
+        except Exception as e:
+            logging.debug(f"Currency rate fetch fallback: {e}")
+
+    final_stars = max(int(api_stars), int(db_stars or 0))
+    return {
+        "bot_stars": final_stars,
+        "api_stars": int(api_stars),
+        "rates": {
+            "star_usd": _rates_cache["star_usd"],
+            "ton_usd": _rates_cache["ton_usd"],
+            "usd_uzs": _rates_cache["usd_uzs"]
+        }
+    }
+
+
 async def handle_get_stats(request: web.Request):
-    """Statistika ma'lumotlari JSON formatida."""
+    """Statistika ma'lumotlari JSON formatida (Stars balansi, kurslar va grafik bilan)."""
     stats = database.get_stats()
+    extra = await get_live_stars_and_rates(stats.get("db_stars", 0))
+    stats.update(extra)
     return web.json_response(stats)
 
 

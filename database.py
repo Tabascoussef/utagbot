@@ -325,6 +325,22 @@ def create_payment_request(user_id: int, plan: str, stars: int, proof_file_id: O
     return req_id
 
 
+def record_stars_payment(user_id: int, plan: str, stars: int, charge_id: Optional[str] = None) -> int:
+    """Telegram Stars orqali amalga oshirilgan muvaffaqiyatli to'lovni bazaga yozadi."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    cursor.execute("""
+        INSERT INTO payment_requests (user_id, plan, stars, status, proof_file_id, created_at)
+        VALUES (?, ?, ?, 'stars_paid', ?, ?)
+    """, (user_id, plan, int(stars), charge_id or "stars_invoice", now_str))
+    req_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return req_id
+
+
 def get_payment_request(request_id: int) -> Optional[Dict[str, Any]]:
     """To'lov so'rovi ma'lumotlarini oladi."""
     conn = get_connection()
@@ -355,7 +371,8 @@ def get_stats() -> Dict[str, Any]:
     cursor.execute("SELECT COUNT(*) AS total FROM users")
     total_users = cursor.fetchone()["total"]
 
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute("""
         SELECT COUNT(*) AS active_subs FROM users
         WHERE subscription_end IS NOT NULL AND subscription_end > ?
@@ -365,13 +382,71 @@ def get_stats() -> Dict[str, Any]:
     cursor.execute("SELECT COUNT(*) AS pending_requests FROM payment_requests WHERE status = 'pending'")
     pending_reqs = cursor.fetchone()["pending_requests"]
 
+    # Stars tushumlari (payment_requests jadvalidagi stars_paid yig'indisi)
+    cursor.execute("SELECT COALESCE(SUM(stars), 0) AS total_stars FROM payment_requests WHERE status = 'stars_paid'")
+    paid_stars_sum = cursor.fetchone()["total_stars"] or 0
+
+    # Agar avval payment_status = 'stars' bo'lib yozilgan userlar bo'lsa
+    cursor.execute("SELECT COUNT(*) AS stars_users FROM users WHERE payment_status = 'stars'")
+    stars_users_cnt = cursor.fetchone()["stars_users"] or 0
+    db_stars = max(int(paid_stars_sum), int(stars_users_cnt) * int(getattr(config, "WEEKLY_STARS", 50)))
+
+    # Obuna turlari bo'yicha statistika
+    cursor.execute("""
+        SELECT payment_status, COUNT(*) AS cnt FROM users
+        WHERE subscription_end IS NOT NULL AND subscription_end > ?
+        GROUP BY payment_status
+    """, (now_str,))
+    sub_breakdown = {row["payment_status"] or "other": row["cnt"] for row in cursor.fetchall()}
+
+    # Oxirgi 7 kunlik obunalar va foydalanuvchilar dinamikasi (Grafik uchun)
+    chart_labels = []
+    chart_subs = []
+    chart_unsub = []
+    uz_days = ["Du", "Se", "Ch", "Pa", "Ju", "Sh", "Ya"]
+
+    cursor.execute("SELECT created_at, subscription_end FROM users")
+    all_u_rows = cursor.fetchall()
+
+    for i in range(6, -1, -1):
+        day_dt = now - timedelta(days=i)
+        day_end_str = day_dt.strftime("%Y-%m-%d 23:59:59")
+        label = f"{uz_days[day_dt.weekday()]} ({day_dt.strftime('%d.%m')})"
+        chart_labels.append(label)
+
+        act_on_day = 0
+        unsub_on_day = 0
+        for r in all_u_rows:
+            c_at = r["created_at"]
+            s_end = r["subscription_end"]
+            # Shu kungacha ro'yxatdan o'tgan userlar
+            if c_at and c_at <= day_end_str:
+                if s_end and s_end > day_end_str:
+                    act_on_day += 1
+                else:
+                    unsub_on_day += 1
+        chart_subs.append(act_on_day)
+        chart_unsub.append(unsub_on_day)
+
+    # Oxirgi kun (bugun) aniq hozirgi ko'rsatkichga teng bo'lishi uchun
+    if chart_subs:
+        chart_subs[-1] = active_subs
+        chart_unsub[-1] = max(0, total_users - active_subs)
+
     conn.close()
 
     return {
         "total_users": total_users,
         "active_subs": active_subs,
         "expired_subs": max(0, total_users - active_subs),
-        "pending_requests": pending_reqs
+        "pending_requests": pending_reqs,
+        "db_stars": db_stars,
+        "sub_breakdown": sub_breakdown,
+        "chart": {
+            "labels": chart_labels,
+            "subscribed": chart_subs,
+            "unsubscribed": chart_unsub
+        }
     }
 
 

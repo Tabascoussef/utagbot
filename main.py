@@ -135,6 +135,51 @@ def escape_markdown_v1(text: str) -> str:
     return re.sub(r'([\[\]\(\)\*\_`])', r'\\\1', str(text))
 
 
+def extract_pyrogram_html_text(message) -> str:
+    """Pyrogram xabaridan (matn, sticker, premium custom emoji) formatlangan HTML matnini oladi."""
+    if not message:
+        return ""
+    if getattr(message, "sticker", None):
+        stk = message.sticker
+        if getattr(stk, "custom_emoji_id", None):
+            return f'<emoji id="{stk.custom_emoji_id}">{stk.emoji or ""}</emoji>'
+        return stk.emoji or ""
+
+    if not getattr(message, "text", None):
+        return ""
+
+    if getattr(message, "entities", None):
+        try:
+            from pyrogram.parser.html import HTML as PyroHTML
+            full_html = PyroHTML.unparse(message.text, message.entities)
+        except Exception:
+            full_html = message.text
+    else:
+        full_html = message.text
+
+    parts = full_html.split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def extract_aiogram_html_text(message: Message) -> str:
+    """Aiogram xabaridan (matn, sticker, premium sticker) Pyrogramga mos HTML matnini oladi."""
+    if not message:
+        return ""
+    if message.sticker:
+        stk = message.sticker
+        if getattr(stk, "custom_emoji_id", None):
+            return f'<emoji id="{stk.custom_emoji_id}">{stk.emoji or ""}</emoji>'
+        return stk.emoji or ""
+
+    raw_html = message.html_text if hasattr(message, "html_text") and message.html_text else (message.text or "")
+    if not raw_html:
+        return ""
+    # Aiogram <tg-emoji emoji-id="..."> ni Pyrogram <emoji id="..."> ga o'tkazish
+    pyro_html = re.sub(r'<tg-emoji emoji-id=[\"\']?(\d+)[\"\']?>', r'<emoji id="\1">', raw_html)
+    pyro_html = pyro_html.replace('</tg-emoji>', '</emoji>')
+    return pyro_html.strip()
+
+
 async def warm_up_cache(client: Client):
     """
     Pyrogram cache yuklanishi: PeerIdInvalid va KeyError xatolarini oldini olish
@@ -324,8 +369,7 @@ async def start_userbot_worker(user_id: int, session_string: str):
                 pass
             return
 
-        args = message.text.split(maxsplit=1) if message.text else []
-        initial_text = args[1].strip() if len(args) > 1 else ""
+        initial_text = extract_pyrogram_html_text(message)
 
         try:
             await message.delete()
@@ -731,6 +775,15 @@ async def process_successful_payment(message: Message):
         plan_name = "Oylik"
 
     new_end_date = database.add_subscription(user_id, days=days, payment_type="stars")
+    try:
+        database.record_stars_payment(
+            user_id=user_id,
+            plan="monthly" if days == 30 else "weekly",
+            stars=payment.total_amount,
+            charge_id=getattr(payment, "telegram_payment_charge_id", "stars")
+        )
+    except Exception as e:
+        logging.warning(f"Stars payment record error: {e}")
 
     await message.answer(
         f"🎉 **To'lov muvaffaqiyatli qabul qilindi!**\n\n"
@@ -1056,7 +1109,7 @@ async def handle_group_speed_change(callback: CallbackQuery):
         pass
 
 
-@dp.message(GroupTagSession.waiting_for_text)
+@dp.message(GroupTagSession.waiting_for_text, F.text | F.sticker)
 async def process_group_text_input(message: Message, state: FSMContext):
     if message.text == "⬅️ Orqaga":
         await state.clear()
@@ -1067,10 +1120,12 @@ async def process_group_text_input(message: Message, state: FSMContext):
     chat_id = data.get("target_chat_id")
     user_id = message.from_user.id
 
+    formatted_text = extract_aiogram_html_text(message)
     if chat_id in group_sessions and group_sessions[chat_id]["caller_id"] == user_id:
-        group_sessions[chat_id]["text"] = message.text
-        safe_text = escape_markdown_v1(message.text)
-        await message.reply(f"✅ **Sarlavha o'rnatildi:** `{safe_text}`", parse_mode="markdown")
+        group_sessions[chat_id]["text"] = formatted_text
+        display_preview = message.text or (message.sticker.emoji if message.sticker else "Matn/Sticker")
+        safe_preview = escape_markdown_v1(display_preview)
+        await message.reply(f"✅ **Matn biriktirildi:** `{safe_preview}`", parse_mode="markdown")
     await state.clear()
 
 
@@ -1245,13 +1300,14 @@ async def skip_tag_text_callback(callback: CallbackQuery, state: FSMContext):
     await ask_tag_limit(callback.message, state)
 
 
-@dp.message(TagState.waiting_for_text)
+@dp.message(TagState.waiting_for_text, F.text | F.sticker)
 async def process_tag_text(message: Message, state: FSMContext):
     if message.text == "⬅️ Orqaga":
         await cmd_back(message, state)
         return
 
-    await state.update_data(tag_text=message.text)
+    formatted_text = extract_aiogram_html_text(message)
+    await state.update_data(tag_text=formatted_text)
     await ask_tag_limit(message, state)
 
 
@@ -1546,13 +1602,15 @@ async def process_edited_mail_text(message: Message, state: FSMContext):
     await state.clear()
 
 
-@dp.message(TagState.waiting_for_edit_text)
+@dp.message(TagState.waiting_for_edit_text, F.text | F.sticker)
 async def process_edited_tag_text(message: Message, state: FSMContext):
     user_id = message.from_user.id
+    formatted_text = extract_aiogram_html_text(message)
     if user_id in tag_jobs:
-        tag_jobs[user_id]["text"] = message.text
-        safe_text = escape_markdown_v1(message.text)
-        await message.answer(f"✅ **Otmetka sarlavhasi yangilandi:** `{safe_text}`", parse_mode="markdown")
+        tag_jobs[user_id]["text"] = formatted_text
+        display_preview = message.text or (message.sticker.emoji if message.sticker else "Matn/Sticker")
+        safe_text = escape_markdown_v1(display_preview)
+        await message.answer(f"✅ **Otmetka matni yangilandi:** `{safe_text}`", parse_mode="markdown")
     else:
         await message.answer("Tahrirlashga faol jarayon topilmadi.")
     await state.clear()
@@ -1635,15 +1693,17 @@ async def background_tagging_task(user_id: int):
             if u.username:
                 tag_mention = f"@{u.username}"
             else:
-                clean_name = escape_markdown_v1(u.first_name or "Foydalanuvchi")
-                tag_mention = f"[{clean_name}](tg://user?id={u.id})"
+                clean_name = html.quote(u.first_name or "Foydalanuvchi")
+                tag_mention = f'<a href="tg://user?id={u.id}">{clean_name}</a>'
 
-            header = current_job.get("text", "")
-            safe_header = escape_markdown_v1(header) if header else ""
-            msg_text = f"📢 **{safe_header}**\n\n{tag_mention}" if safe_header else tag_mention
+            header = (current_job.get("text", "") or "").strip()
+            if header and header != "NO_TEXT":
+                msg_text = f"{tag_mention}   {header}"
+            else:
+                msg_text = tag_mention
 
             try:
-                await cl.send_message(chat_id, msg_text.strip(), parse_mode=ParseMode.MARKDOWN)
+                await cl.send_message(chat_id, msg_text, parse_mode=ParseMode.HTML)
                 current_job["current_step"] += 1
             except FloodWait as e:
                 logging.warning(f"FloodWait: {e.value} soniya kutilmoqda...")
@@ -1659,7 +1719,14 @@ async def background_tagging_task(user_id: int):
                     pass
                 return
             except Exception as e:
-                logging.error(f"Tag yuborishda xato: {e}")
+                try:
+                    await cl.send_message(chat_id, msg_text)
+                    current_job["current_step"] += 1
+                except FloodWait as fw:
+                    logging.warning(f"FloodWait: {fw.value} soniya kutilmoqda...")
+                    await asyncio.sleep(fw.value)
+                except Exception as ex:
+                    logging.error(f"Tag yuborishda xato: {ex}")
 
             # Belgilangan tezlik (1.5s - 5.0s) bo'yicha kutish
             await asyncio.sleep(sleep_interval)
