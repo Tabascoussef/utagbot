@@ -1845,8 +1845,14 @@ HTML_PAGE = """<!DOCTYPE html>
                     adminBadge = `<span class="badge-status admin">⭐️ Admin</span>`;
                 }
 
+                let subBadgeText = "Obuna yo'q";
+                if (isActive) {
+                    subBadgeText = (u.days_left === "∞" || isSuper || isAdmin) 
+                        ? "Faol (Cheksiz)" 
+                        : `Faol (${u.days_left} kun)`;
+                }
                 const statusBadge = isActive 
-                    ? `<span class="badge-status active">Faol (${u.days_left} kun)</span>` 
+                    ? `<span class="badge-status active">${subBadgeText}</span>` 
                     : `<span class="badge-status expired">Obuna yo'q</span>`;
                 
                 const expDate = u.subscription_end ? u.subscription_end.slice(0, 16) : "Mavjud emas";

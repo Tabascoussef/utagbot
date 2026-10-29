@@ -190,7 +190,7 @@ def is_subscribed(user_id: int) -> bool:
     Foydalanuvchining obunasi faol ekanligini tekshiradi.
     Bot admini har doim cheksiz obunaga ega.
     """
-    if int(user_id) in getattr(config, 'ADMIN_IDS', [config.ADMIN_ID]):
+    if is_admin(user_id):
         return True
 
     user = get_user(user_id)
@@ -206,7 +206,7 @@ def is_subscribed(user_id: int) -> bool:
 
 def get_subscription_info(user_id: int) -> Dict[str, Any]:
     """Obuna holati haqida to'liq axborot qaytaradi."""
-    if int(user_id) in getattr(config, 'ADMIN_IDS', [config.ADMIN_ID]):
+    if is_admin(user_id):
         return {
             "is_active": True,
             "status": "admin",
@@ -543,10 +543,18 @@ def get_all_users_full() -> List[Dict[str, Any]]:
                     days_left = (dt - now).days
             except Exception:
                 pass
+
+        is_super = is_super_admin(u["user_id"])
+        is_adm = is_admin(u["user_id"])
+        if is_super or is_adm:
+            is_act = True
+            if not days_left:
+                days_left = "∞"
+
         u["is_active"] = is_act
         u["days_left"] = days_left
-        u["is_super_admin"] = is_super_admin(u["user_id"])
-        u["is_admin"] = is_admin(u["user_id"])
+        u["is_super_admin"] = is_super
+        u["is_admin"] = is_adm
         users.append(u)
     return users
 
