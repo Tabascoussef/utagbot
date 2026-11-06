@@ -28,7 +28,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from pyrogram import Client, filters
+from pyrogram import Client, filters, raw, utils
 from pyrogram.enums import ChatType, ParseMode
 from pyrogram.errors import (
     SessionPasswordNeeded,
@@ -1403,6 +1403,34 @@ async def start_mailing_job(callback: CallbackQuery, state: FSMContext):
     asyncio.create_task(background_mailing_task(user_id))
 
 
+async def send_background_message(cl: Client, chat_id: int | str, text: str, parse_mode: Optional[ParseMode] = ParseMode.HTML):
+    """
+    Xabarni Telegram MTProto `background=True` bayrog'i bilan yuborish.
+    Bu xabarni guruhda to'liq saqlab qoladi (o'chirilmaydi), lekin Telegram ilovasida
+    ekranning avtomatik ravishda yangi yuborilgan xabarga pastga surilib (scroll bo'lib) ketishini oldini oladi.
+    """
+    try:
+        message, entities = (await utils.parse_text_entities(cl, text, parse_mode, None)).values()
+        peer = await cl.resolve_peer(chat_id)
+        return await cl.invoke(
+            raw.functions.messages.SendMessage(
+                peer=peer,
+                message=message,
+                entities=entities,
+                random_id=cl.rnd_id(),
+                background=True,
+                no_webpage=True
+            )
+        )
+    except FloodWait:
+        raise
+    except (AuthKeyUnregistered, AuthKeyInvalid, UserDeactivated, Unauthorized):
+        raise
+    except Exception as e:
+        logging.warning(f"Background invoke ogohlantirish: {e}, fallback send_message ishlatilmoqda...")
+        return await cl.send_message(chat_id, text, parse_mode=parse_mode)
+
+
 async def background_mailing_task(user_id: int):
     if user_id not in running_userbots:
         try:
@@ -1437,7 +1465,7 @@ async def background_mailing_task(user_id: int):
                 return
 
             try:
-                await cl.send_message(job["chat_id"], job["text"])
+                await send_background_message(cl, job["chat_id"], job["text"], parse_mode=None)
                 job["current_step"] += 1
             except FloodWait as e:
                 logging.warning(f"Mailing FloodWait: {e.value} soniya kutilmoqda...")
@@ -1686,7 +1714,7 @@ async def background_tagging_task(user_id: int):
                 msg_text = tag_mention
 
             try:
-                await cl.send_message(chat_id, msg_text, parse_mode=ParseMode.HTML)
+                await send_background_message(cl, chat_id, msg_text, parse_mode=ParseMode.HTML)
                 current_job["current_step"] += 1
             except FloodWait as e:
                 logging.warning(f"FloodWait: {e.value} soniya kutilmoqda...")
@@ -1703,7 +1731,7 @@ async def background_tagging_task(user_id: int):
                 return
             except Exception as e:
                 try:
-                    await cl.send_message(chat_id, msg_text)
+                    await send_background_message(cl, chat_id, msg_text, parse_mode=None)
                     current_job["current_step"] += 1
                 except FloodWait as fw:
                     logging.warning(f"FloodWait: {fw.value} soniya kutilmoqda...")
