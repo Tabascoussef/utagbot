@@ -529,20 +529,23 @@ async def cmd_start(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="Obuna va Tariflar", callback_data="open_sub_menu")]
     ])
 
-    sub_info = database.get_subscription_info(user_id)
-    status_text = sub_info.get("display_text", "Obuna yo'q")
-    user_speed = database.get_user_speed(user_id)
-    safe_name = html.quote(message.from_user.full_name)
-
     start_text = (
-        f"Assalomu alaykum, <b>{safe_name}</b>!\n\n"
-        "Profilingiz nomidan guruhlarda a'zolarni avtomatik belgilash (UTAG) va xabar jo'natish xizmati.\n\n"
-        f"<b>Hisob holati:</b>\n"
-        f"• Obuna: <code>{status_text}</code>\n"
-        f"• Joriy tezlik: <code>{user_speed} soniya</code>\n\n"
-        "<b>Tezkor boshqaruv:</b>\n"
-        "• Guruh ichida: <code>;utag</code> — sozlash va boshqaruv paneli\n"
-        "• Guruhda: <code>/1</code> — boshlash, <code>/2</code> — to'xtatish"
+        "💎 <b>MAFIA GURUHLARI UCHUN UTAG BOT</b> 💎\n\n"
+        "🎭 <b>Mafia guruhingizni yanada qulay va zamonaviy boshqaring!</b>\n\n"
+        "🤖 <b>UTAG BOT — obuna va tariflar tizimi bir joyda!</b>\n\n"
+        "✨ <b>IMKONIYATLAR:</b>\n"
+        f"🔷 Haftalik obuna — 7 kun / {config.WEEKLY_STARS} ⭐\n"
+        f"🔷 Oylik obuna — 30 kun / {config.MONTHLY_STARS} ⭐\n"
+        "🔷 Telegram Stars orqali avtomatik faollashtirish\n"
+        "🔷 Karta yoki admin orqali to‘lov imkoniyati @abduxalilov017\n\n"
+        "🛡 <b>ISHONCH VA XAVFSIZLIK</b>\n"
+        "✅ To‘lovlar bo‘yicha tasdiq va nazorat\n"
+        "✅ Userlarni sababsiz chetlatmaslik\n"
+        "✅ Hech qanday shaxsiy muammo yoki adovatga qarab munosabat qilmaslik\n"
+        "✅ Har bir foydalanuvchiga xolis va hurmat bilan yondashish\n\n"
+        "🤝 <b>Biz uchun ishonch, adolat va foydalanuvchilar roziligi muhim!</b>\n\n"
+        "📩 <b>UTAG BOT — mafia guruhingiz uchun qulay yechim.</b>\n\n"
+        "♠️ <b>*Adolatli boshqaruv. Ishonchli xizmat. Qulay tizim.*</b> ♠️"
     )
 
     await message.answer(
