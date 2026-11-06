@@ -471,15 +471,15 @@ async def start_userbot_worker(user_id: int, session_string: str):
             tag_jobs[sender_id]["status"] = "stopped"
             step = tag_jobs[sender_id].get("current_step", 0)
             try:
-                await bot.send_message(
-                    chat_id,
-                    f"🛑 **Otmetka to'xtatildi (/2 buyrug'i).**\n📊 Jami: `{step}` ta a'zo belgilandi.",
-                    parse_mode="markdown"
-                )
+                await message.delete()
             except Exception:
                 pass
             try:
-                await message.delete()
+                await bot.send_message(
+                    sender_id,
+                    f"🛑 **Otmetka to'xtatildi (/2 buyrug'i).**\n📊 Jami: `{step}` ta a'zo belgilandi.",
+                    parse_mode="markdown"
+                )
             except Exception:
                 pass
 
@@ -618,11 +618,18 @@ async def handle_slash_one(message: Message, state: FSMContext):
 async def handle_slash_two(message: Message, state: FSMContext):
     """
     /2 — UTAG to'xtatish (stop tagging).
-    Guruhda yozilsa: shu guruhdagi jarayonni to'xtatadi.
+    Guruhda yozilsa: shu guruhdagi jarayonni to'xtatadi, /2 ni o'chiradi va guruhga ortiqcha xabar yozmaydi.
     Shaxsiyda yozilsa: foydalanuvchining faol jarayonini to'xtatadi.
     """
     user_id = message.from_user.id
     chat_id = message.chat.id
+    is_group = message.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]
+
+    if is_group:
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
     stopped_anything = False
 
@@ -631,21 +638,39 @@ async def handle_slash_two(message: Message, state: FSMContext):
         tag_jobs[user_id]["status"] = "stopped"
         step = tag_jobs[user_id].get("current_step", 0)
         stopped_anything = True
-        await message.answer(f"🛑 **Otmetka jarayoni to'xtatildi!**\n📊 Jami: `{step}` ta a'zo belgilandi.", parse_mode="markdown")
+        if is_group:
+            try:
+                await bot.send_message(user_id, f"🛑 **Otmetka to'xtatildi (/2 buyrug'i).**\n📊 Jami: `{step}` ta a'zo belgilandi.", parse_mode="markdown")
+            except Exception:
+                pass
+        else:
+            await message.answer(f"🛑 **Otmetka jarayoni to'xtatildi!**\n📊 Jami: `{step}` ta a'zo belgilandi.", parse_mode="markdown")
 
     # 2. Mailing job to'xtatish
     if user_id in mailing_jobs:
         mailing_jobs[user_id]["status"] = "stopped"
         stopped_anything = True
-        await message.answer("🛑 **Xabar yuborish jarayoni to'xtatildi!**", parse_mode="markdown")
+        if is_group:
+            try:
+                await bot.send_message(user_id, "🛑 **Xabar yuborish jarayoni to'xtatildi!**", parse_mode="markdown")
+            except Exception:
+                pass
+        else:
+            await message.answer("🛑 **Xabar yuborish jarayoni to'xtatildi!**", parse_mode="markdown")
 
     if not stopped_anything:
         # Guruhdagi boshqa seans egasi bo'lsa
         session = group_sessions.get(chat_id)
         if session and session.get("caller_id") == user_id and user_id in tag_jobs:
             tag_jobs[user_id]["status"] = "stopped"
-            await message.answer("🛑 **Otmetka jarayoni to'xtatildi!**", parse_mode="markdown")
-        else:
+            if is_group:
+                try:
+                    await bot.send_message(user_id, "🛑 **Otmetka jarayoni to'xtatildi!**", parse_mode="markdown")
+                except Exception:
+                    pass
+            else:
+                await message.answer("🛑 **Otmetka jarayoni to'xtatildi!**", parse_mode="markdown")
+        elif not is_group:
             await message.answer("⚠️ Hozirda faol ishlayotgan otmetka jarayoni topilmadi.")
 
 
@@ -1746,7 +1771,7 @@ async def background_tagging_task(user_id: int):
         if user_id in tag_jobs and tag_jobs[user_id].get("status") == "running":
             final_step = tag_jobs[user_id].get("current_step", 0)
             reason = " (400 ta limitga yetdi)" if final_step >= config.HARD_TAG_LIMIT else ""
-            if chat_id:
+            if chat_id and chat_id == user_id:
                 try:
                     await bot.send_message(
                         chat_id,
@@ -1757,7 +1782,7 @@ async def background_tagging_task(user_id: int):
                     pass
             if user_id != chat_id:
                 try:
-                    await bot.send_message(user_id, f"⚡️ **Otmetka yakunlandi!** Jami: `{final_step}` ta.")
+                    await bot.send_message(user_id, f"⚡️ **Otmetka yakunlandi!**{reason}\n📊 Jami: `{final_step}` ta a'zo belgilandi.")
                 except Exception:
                     pass
 
