@@ -1174,7 +1174,6 @@ async def execute_group_tag(chat_id: int, user_id: int):
     session = group_sessions[chat_id]
     tag_text = session["text"]
     limit = session["limit"]
-    caller_name = session.get("caller_name", "Foydalanuvchi")
 
     if user_id in tag_jobs:
         tag_jobs[user_id]["status"] = "stopped"
@@ -1188,25 +1187,6 @@ async def execute_group_tag(chat_id: int, user_id: int):
         "chat_id": chat_id,
         "current_step": 0
     }
-
-    user_speed = database.get_user_speed(user_id)
-    display_text = escape_markdown_v1(tag_text) if tag_text else "Matnsiz"
-    safe_caller_name = escape_markdown_v1(caller_name)
-
-    await bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"⚡️ **Otmetka boshlandi!**\n"
-            f"📝 Sarlavha: `{display_text}`\n"
-            f"🔢 Limit: `{effective_limit} ta` (Maksimal: 400)\n"
-            f"⏱ Tezlik: `{user_speed} soniya`\n"
-            f"👤 Boshqaruvchi: [{safe_caller_name}](tg://user?id={user_id})\n\n"
-            f"⚡️ *Tezkor to'xtatish: `/2`*\n"
-            f"🔒 *Jarayonni quyidagi tugmalar orqali ham boshqarishingiz mumkin:*"
-        ),
-        reply_markup=get_group_control_keyboard("running", user_id),
-        parse_mode="markdown"
-    )
 
     asyncio.create_task(background_tagging_task(user_id))
 
