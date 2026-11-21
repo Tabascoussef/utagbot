@@ -2254,7 +2254,7 @@ async def cmd_guide(message: Message):
         "3️⃣ **Tezkor buyruqlar:** Guruh ichida **`/1`** — otmetkani boshlaydi, **`/2`** — otmetkani to'xtatadi.\n"
         "4️⃣ **Tezlik:** 1.5s, 2s, 3s, 5s intervallaridan birini tanlashingiz mumkin.\n"
         "5️⃣ **Chegara:** Bitta otmetka seansida maksimal 400 ta a'zo belgilanadi (Telegram cheklovlariga muvofiq).\n"
-        "6️⃣ **Obuna:** Haftalik (50 Stars) va Oylik (200 Stars) paketlar Telegram Stars yoki karta orqali faollashadi.",
+        f"6️⃣ **Obuna:** Haftalik ({config.WEEKLY_STARS} Stars) va Oylik ({config.MONTHLY_STARS} Stars) paketlar Telegram Stars yoki karta orqali faollashadi.",
         parse_mode="markdown"
     )
 

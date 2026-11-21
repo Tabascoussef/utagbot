@@ -13,8 +13,8 @@ ADMIN_IDS = [ADMIN_ID_1, ADMIN_ID_2]
 ADMIN_ID = ADMIN_ID_1  
 
 
-WEEKLY_STARS = int(os.getenv("WEEKLY_STARS", "50"))     
-MONTHLY_STARS = int(os.getenv("MONTHLY_STARS", "200"))  
+WEEKLY_STARS = int(os.getenv("WEEKLY_STARS", "25"))
+MONTHLY_STARS = int(os.getenv("MONTHLY_STARS", "100"))
 
 
 DEFAULT_SPEED = 2.0
